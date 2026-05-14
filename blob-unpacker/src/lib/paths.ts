@@ -1,18 +1,24 @@
 // ============================================================
 // BLOB UNPACKER — PATH HELPERS
 // Centralizes per-website subfolder resolution so that every
-// output stage writes into:
+// output stage writes into a clean, target-centric layout:
 //
-//   <outDir>/<hostname>/deobfuscated/   ← beautified JS
-//   <outDir>/<hostname>/sources/        ← source-map reconstructed files
-//   <outDir>/<hostname>/raw/            ← original downloaded JS (optional)
-//   <outDir>/<hostname>/endpoints.json
-//   <outDir>/<hostname>/secrets.json
-//   <outDir>/<hostname>/comments.json
-//   <outDir>/<hostname>/configs.json
-//   <outDir>/<hostname>/summary.md
-//   <outDir>/<hostname>/run-report.json
-//   <outDir>/<hostname>/manifests/
+//   <outDir>/<target-host>/
+//     ├── deobfuscated/       ← first-party beautified JS
+//     ├── sources/            ← first-party source-map files
+//     ├── raw/                ← first-party original JS
+//     ├── endpoints.json
+//     ├── secrets.json
+//     ├── comments.json
+//     ├── configs.json
+//     ├── summary.md
+//     ├── run-report.json
+//     ├── manifests/
+//     └── third-party/
+//         └── <hostname>/
+//             ├── deobfuscated/
+//             ├── sources/
+//             └── raw/
 // ============================================================
 
 import * as path from "path";
@@ -29,6 +35,46 @@ import * as path from "path";
 export function getHostDir(assetUrl: string, baseOutDir: string): string {
   const hostname = extractHostname(assetUrl);
   return path.join(baseOutDir, hostname);
+}
+
+/**
+ * Resolve the output directory for a specific asset, aware of
+ * whether it's first-party (same host as target) or third-party.
+ *
+ * First-party assets go to:
+ *   <outDir>/<target-host>/
+ *
+ * Third-party assets go to:
+ *   <outDir>/<target-host>/third-party/<asset-host>/
+ *
+ * @param assetUrl     The URL of the JS asset being written
+ * @param targetUrls   The target URLs from the pipeline config
+ * @param baseOutDir   The root output directory
+ */
+export function getAssetDir(
+  assetUrl: string,
+  targetUrls: string[],
+  baseOutDir: string
+): string {
+  const assetHost = extractHostname(assetUrl);
+  const targetHost = extractTargetHostname(targetUrls);
+
+  if (assetHost === targetHost || assetHost === "_unknown") {
+    // First-party: write directly under the target folder
+    return path.join(baseOutDir, targetHost);
+  }
+
+  // Third-party: nest under target/third-party/<hostname>
+  return path.join(baseOutDir, targetHost, "third-party", assetHost);
+}
+
+/**
+ * Extract the primary target hostname from the pipeline's target_urls.
+ * Uses the first target URL; falls back to "_unknown".
+ */
+export function extractTargetHostname(targetUrls: string[]): string {
+  if (targetUrls.length === 0) return "_unknown";
+  return extractHostname(targetUrls[0]);
 }
 
 /**

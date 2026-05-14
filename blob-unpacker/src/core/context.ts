@@ -303,11 +303,9 @@ export class PipelineContext {
     this.config = Object.freeze(deepMerge(DEFAULT_CONFIG, userConfig));
     this.startedAt = new Date().toISOString();
 
-    // Ensure output directories exist
+    // Ensure root output directory exists
     const outDir = this.config.output.dir;
-    for (const sub of ["sources", "deobfuscated", "manifests"]) {
-      fs.mkdirSync(path.join(outDir, sub), { recursive: true });
-    }
+    fs.mkdirSync(outDir, { recursive: true });
 
     this.logger = new Logger(outDir);
     this.state = new StateManager(outDir);

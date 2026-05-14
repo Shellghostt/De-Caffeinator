@@ -66,23 +66,30 @@
  * ## Output Directory Structure
  * ```
  * output/
- * ├── endpoints.json          # All discovered endpoints
- * ├── secrets.json            # All discovered secrets (masked)
- * ├── comments.json           # Security-relevant developer comments
- * ├── configs.json            # Configuration values found in code
- * ├── artifact-index.json     # Per-asset finding counts
- * ├── run-report.json         # Machine-readable run metadata
- * ├── summary.md              # Human-readable findings report
- * ├── manifests/
- * │   ├── endpoints-contract.json   # Versioned contract for Source Auditor
- * │   └── artifacts-contract.json   # Versioned contract for Vuln Detection
- * ├── sources/
- * │   └── <content-hash>/     # Reconstructed source files per asset
- * │       ├── src/
- * │       │   └── App.tsx
- * │       └── _file_index.txt
- * ├── deobfuscated/           # De-obfuscated JS output
- * └── pipeline.log            # Full pipeline execution log
+ * └── <target-host>/                ← Single folder per scanned target
+ *     ├── endpoints.json            ← ALL discovered endpoints
+ *     ├── secrets.json              ← ALL discovered secrets (masked)
+ *     ├── comments.json             ← Security-relevant developer comments
+ *     ├── configs.json              ← Configuration values found in code
+ *     ├── artifact-index.json       ← Per-asset finding counts
+ *     ├── run-report.json           ← Machine-readable run metadata
+ *     ├── summary.md                ← Human-readable findings report
+ *     ├── manifests/
+ *     │   ├── endpoints-contract.json
+ *     │   └── artifacts-contract.json
+ *     ├── deobfuscated/             ← First-party de-obfuscated JS
+ *     ├── raw/                      ← First-party original JS
+ *     ├── sources/                  ← First-party source-map files
+ *     │   └── <content-hash>/
+ *     │       ├── src/
+ *     │       │   └── App.tsx
+ *     │       └── _file_index.txt
+ *     └── third-party/              ← External dependency JS
+ *         ├── _index.json           ← Lists all third-party domains
+ *         └── <hostname>/
+ *             ├── deobfuscated/
+ *             ├── raw/
+ *             └── sources/
  * ```
  */
 

@@ -201,8 +201,18 @@ def show_results(output_dir):
     """Display results summary after pipeline completes."""
     print_section("Pipeline Results")
 
+    # Find the target host directory (first subdirectory that isn't a dotfile)
+    target_dir = output_dir
+    if os.path.exists(output_dir):
+        for item in sorted(os.listdir(output_dir)):
+            full = os.path.join(output_dir, item)
+            if os.path.isdir(full) and not item.startswith(".") and not item.startswith("_"):
+                target_dir = full
+                print(f"  {C.CYAN}{C.BOLD}Target: {item}{C.RESET}\n")
+                break
+
     # Show run report
-    report_path = os.path.join(output_dir, "run-report.json")
+    report_path = os.path.join(target_dir, "run-report.json")
     if os.path.exists(report_path):
         with open(report_path, "r", encoding="utf-8") as f:
             report = json.load(f)
@@ -216,7 +226,7 @@ def show_results(output_dir):
     # Show finding counts
     for name, filename in [("Endpoints", "endpoints"), ("Secrets", "secrets"),
                             ("Comments", "comments"), ("Configs", "configs")]:
-        fpath = os.path.join(output_dir, f"{filename}.json")
+        fpath = os.path.join(target_dir, f"{filename}.json")
         if os.path.exists(fpath):
             with open(fpath, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -227,10 +237,23 @@ def show_results(output_dir):
 
     print()
 
+    # Show third-party domain count
+    tp_index = os.path.join(target_dir, "third-party", "_index.json")
+    if os.path.exists(tp_index):
+        with open(tp_index, "r", encoding="utf-8") as f:
+            tp_data = json.load(f)
+        tp_count = tp_data.get("count", 0)
+        print(f"    [*] Third-party domains: {C.YELLOW}{tp_count}{C.RESET}")
+        for domain in tp_data.get("third_party_domains", [])[:10]:
+            print(f"        {C.DIM}- {domain}{C.RESET}")
+        if tp_count > 10:
+            print(f"        {C.DIM}... and {tp_count - 10} more{C.RESET}")
+        print()
+
     # Show output files
     print(f"  {C.BOLD}Output Files:{C.RESET}")
-    for item in sorted(os.listdir(output_dir)):
-        full = os.path.join(output_dir, item)
+    for item in sorted(os.listdir(target_dir)):
+        full = os.path.join(target_dir, item)
         if os.path.isfile(full):
             size = os.path.getsize(full)
             size_str = format_size(size)
@@ -239,7 +262,7 @@ def show_results(output_dir):
             count = sum(1 for _ in Path(full).rglob("*") if _.is_file())
             print(f"    [D] {item}/ {C.DIM}({count} files){C.RESET}")
 
-    summary_path = os.path.join(output_dir, "summary.md")
+    summary_path = os.path.join(target_dir, "summary.md")
     if os.path.exists(summary_path):
         abs_path = os.path.abspath(summary_path)
         print(f"\n  {C.CYAN}{C.BOLD}>> Full report: {abs_path}{C.RESET}")

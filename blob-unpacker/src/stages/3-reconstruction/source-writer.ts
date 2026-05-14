@@ -8,7 +8,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { ReconstructedFile } from "../../types/contracts";
 import { PipelineContext } from "../../core/context";
-import { getHostDir } from "../../lib/paths";
+import { getAssetDir } from "../../lib/paths";
 
 export function writeSourceFiles(
   files: ReconstructedFile[],
@@ -18,11 +18,11 @@ export function writeSourceFiles(
 ): void {
   if (!ctx.config.output.write_source_files || files.length === 0) return;
 
-  // Per-hostname subdirectory when we know the asset URL
-  const hostDir = assetUrl
-    ? getHostDir(assetUrl, ctx.config.output.dir)
+  // Resolve output dir: first-party vs third-party nesting
+  const assetDir = assetUrl
+    ? getAssetDir(assetUrl, ctx.config.target_urls, ctx.config.output.dir)
     : ctx.config.output.dir;
-  const baseDir = path.join(hostDir, "sources", assetHash);
+  const baseDir = path.join(assetDir, "sources", assetHash);
   const writtenPaths: string[] = [];
 
   for (const file of files) {

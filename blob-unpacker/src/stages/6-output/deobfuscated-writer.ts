@@ -1,7 +1,8 @@
 // ============================================================
 // STAGE 6 — DEOBFUSCATED FILE WRITER
 // Writes de-obfuscated JavaScript output to disk.
-// Each asset gets a file in output/deobfuscated/.
+// First-party assets → <target>/deobfuscated/
+// Third-party assets → <target>/third-party/<host>/deobfuscated/
 // Webpack-split modules get individual files in a subdirectory.
 // ============================================================
 
@@ -10,7 +11,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { DeobfuscatedAsset } from "../../types/contracts";
 import { PipelineContext } from "../../core/context";
-import { getHostDir } from "../../lib/paths";
+import { getAssetDir } from "../../lib/paths";
 
 export function writeDeobfuscatedOutput(
   asset: DeobfuscatedAsset,
@@ -18,15 +19,15 @@ export function writeDeobfuscatedOutput(
 ): void {
   if (!ctx.config.output.write_source_files) return;
 
-  // ── Per-hostname subdirectory ───────────────────────────
-  const hostDir = getHostDir(asset.asset_url, ctx.config.output.dir);
-  const deobDir = path.join(hostDir, "deobfuscated");
+  // ── Resolve output dir (first-party vs third-party) ────
+  const assetDir = getAssetDir(asset.asset_url, ctx.config.target_urls, ctx.config.output.dir);
+  const deobDir = path.join(assetDir, "deobfuscated");
   fs.mkdirSync(deobDir, { recursive: true });
 
   // ── Also save the raw original JS ──────────────────────
   // (only if it differs from the deobfuscated version)
   if (asset.original_js && asset.original_js !== asset.readable_js) {
-    const rawDir = path.join(hostDir, "raw");
+    const rawDir = path.join(assetDir, "raw");
     fs.mkdirSync(rawDir, { recursive: true });
     const rawPath = path.join(rawDir, `${urlToFilename(asset.asset_url)}.js`);
     try {
