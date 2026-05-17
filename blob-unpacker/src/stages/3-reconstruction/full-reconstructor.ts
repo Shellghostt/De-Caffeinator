@@ -42,7 +42,7 @@ export function fullReconstruct(map: ParsedSourceMap): ReconstructedFile[] {
   // Add a project manifest summarizing what was recovered
   if (files.length > 0) {
     const manifest = buildManifest(files, map);
-    files.push({ path: "_manifest.md", content: manifest });
+    files.push({ path: "_manifest.json", content: manifest });
   }
 
   return files;
@@ -110,53 +110,39 @@ function isInternalEntry(p: string): boolean {
  * Build a markdown manifest summarizing the reconstructed project.
  */
 function buildManifest(files: ReconstructedFile[], map: ParsedSourceMap): string {
-  // Group files by directory
-  const tree = new Map<string, string[]>();
+  // Build a nested tree structure
+  const tree: any = {};
   for (const f of files) {
     if (f.path.startsWith("_")) continue; // skip meta files
-    const parts = f.path.split("/");
-    const dir = parts.slice(0, -1).join("/") || "(root)";
+    const parts = f.path.split(/[/\\]/);
+    let current = tree;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!current[part]) current[part] = {};
+      current = current[part];
+    }
     const file = parts[parts.length - 1];
-    if (!tree.has(dir)) tree.set(dir, []);
-    tree.get(dir)!.push(file);
+    current[file] = "file";
   }
 
   // Count by extension
-  const extCounts = new Map<string, number>();
+  const fileTypes: Record<string, number> = {};
   for (const f of files) {
     if (f.path.startsWith("_")) continue;
     const ext = f.path.split(".").pop()?.toLowerCase() ?? "unknown";
-    extCounts.set(ext, (extCounts.get(ext) ?? 0) + 1);
+    fileTypes[ext] = (fileTypes[ext] ?? 0) + 1;
   }
 
-  const lines: string[] = [
-    "# Source Reconstruction Manifest",
-    "",
-    "**Coverage:** Full (all sourcesContent available)",
-    `**Total files recovered:** ${files.filter((f) => !f.path.startsWith("_")).length}`,
-    `**Source map version:** ${map.version}`,
-    map.file ? `**Generated file:** ${map.file}` : "",
-    map.sourceRoot ? `**Source root:** ${map.sourceRoot}` : "",
-    `**Original identifiers:** ${map.names.length}`,
-    "",
-    "## File Types",
-    "",
-    ...[...extCounts.entries()]
-      .sort(([, a], [, b]) => b - a)
-      .map(([ext, count]) => `- **.${ext}**: ${count} file(s)`),
-    "",
-    "## Directory Tree",
-    "",
-  ];
+  const manifest = {
+    coverage: "full",
+    total_files_recovered: files.filter((f) => !f.path.startsWith("_")).length,
+    source_map_version: map.version,
+    generated_file: map.file ?? null,
+    source_root: map.sourceRoot ?? null,
+    original_identifiers: map.names.length,
+    file_types: fileTypes,
+    directory_tree: tree,
+  };
 
-  const sortedDirs = [...tree.entries()].sort(([a], [b]) => a.localeCompare(b));
-  for (const [dir, dirFiles] of sortedDirs) {
-    lines.push(`### ${dir}/`);
-    for (const file of dirFiles.sort()) {
-      lines.push(`- ✅ ${file}`);
-    }
-    lines.push("");
-  }
-
-  return lines.filter(Boolean).join("\n");
+  return JSON.stringify(manifest, null, 2);
 }

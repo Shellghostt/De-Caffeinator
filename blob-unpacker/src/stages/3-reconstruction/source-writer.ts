@@ -1,7 +1,8 @@
 // ============================================================
 // STAGE 3 — SOURCE WRITER (Enhanced)
 // Writes recovered source files to disk under output/sources/.
-// Also writes a directory index and handles path conflicts.
+// Also writes a directory index, raw .map files, and handles
+// path conflicts.
 // ============================================================
 
 import * as fs from "fs";
@@ -47,11 +48,11 @@ export function writeSourceFiles(
     }
   }
 
-  // Write a simple file index
+  // Write a JSON file index
   if (writtenPaths.length > 0) {
     try {
-      const indexContent = writtenPaths.sort().join("\n") + "\n";
-      const indexPath = path.join(baseDir, "_file_index.txt");
+      const indexContent = JSON.stringify(writtenPaths.sort(), null, 2);
+      const indexPath = path.join(baseDir, "_file_index.json");
       fs.mkdirSync(path.dirname(indexPath), { recursive: true });
       fs.writeFileSync(indexPath, indexContent, "utf-8");
     } catch {
@@ -62,4 +63,36 @@ export function writeSourceFiles(
   ctx.logger.info(`Source writer: wrote ${writtenPaths.length} file(s) to sources/${assetHash}`, {
     stage: "stage-3",
   });
+}
+
+/**
+ * Write the raw .map file to disk alongside the reconstructed sources.
+ * Persists the source map JSON so it's available for external tooling.
+ */
+export function writeMapFile(
+  mapContent: string,
+  assetHash: string,
+  ctx: PipelineContext,
+  assetUrl?: string
+): void {
+  if (!ctx.config.output.write_source_files) return;
+
+  const assetDir = assetUrl
+    ? getAssetDir(assetUrl, ctx.config.target_urls, ctx.config.output.dir)
+    : ctx.config.output.dir;
+  const baseDir = path.join(assetDir, "sources", assetHash);
+
+  try {
+    const mapPath = path.join(baseDir, "_sourcemap.map");
+    fs.mkdirSync(path.dirname(mapPath), { recursive: true });
+    fs.writeFileSync(mapPath, mapContent, "utf-8");
+    ctx.logger.info(`Source writer: saved raw .map file to sources/${assetHash}/_sourcemap.map`, {
+      stage: "stage-3",
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    ctx.logger.warn(`Source writer: failed to write .map file: ${msg}`, {
+      stage: "stage-3",
+    });
+  }
 }

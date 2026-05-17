@@ -15,7 +15,7 @@ import { PipelineContext } from "../../core/context";
 import { parseSourceMap, hasFullContent, hasPartialContent } from "./map-parser";
 import { fullReconstruct } from "./full-reconstructor";
 import { partialReconstruct } from "./partial-reconstructor";
-import { writeSourceFiles } from "./source-writer";
+import { writeSourceFiles, writeMapFile } from "./source-writer";
 
 export async function reconstruct(
   asset: AssetWithMapInfo,
@@ -74,6 +74,11 @@ export async function reconstruct(
     const files = fullReconstruct(map);
     writeSourceFiles(files, asset.content_hash, ctx, asset.url);
 
+    // Persist the raw .map file to disk
+    if (asset.map_content) {
+      writeMapFile(asset.map_content, asset.content_hash, ctx, asset.url);
+    }
+
     ctx.logger.info(`Stage 3: full reconstruction — ${files.length} file(s) recovered`, {
       stage: "stage-3",
       asset_url: asset.url,
@@ -95,6 +100,11 @@ export async function reconstruct(
 
   if (recoveredFiles.length > 0) {
     writeSourceFiles(recoveredFiles, asset.content_hash, ctx, asset.url);
+  }
+
+  // Persist the raw .map file to disk
+  if (asset.map_content) {
+    writeMapFile(asset.map_content, asset.content_hash, ctx, asset.url);
   }
 
   const coverage = hasPartialContent(map) ? "partial" : "paths_only";

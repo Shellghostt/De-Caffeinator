@@ -40,6 +40,8 @@ export class AssetQueue {
   private seenUrls = new Set<string>();
   private seenHashes = new Set<string>();
   private inFlightCount = 0;
+  /** Tracks normalized URLs currently being processed — prevents duplicate concurrent work */
+  private inFlightUrls = new Set<string>();
   private ctx: PipelineContext;
 
   constructor(ctx: PipelineContext) {
@@ -106,10 +108,27 @@ export class AssetQueue {
       return null;
     }
 
-    const item = this.items.shift()!;
-    this.inFlightCount++;
-    this.ctx.state.setAssetStatus(item.asset.url, "fetching");
-    return item.asset;
+    // Find the first item not already being processed by another worker
+    let idx = 0;
+    while (idx < this.items.length) {
+      const candidate = this.items[idx];
+      const normalizedCandidateUrl = normalizeUrl(candidate.asset.url);
+      if (!this.inFlightUrls.has(normalizedCandidateUrl)) {
+        // Remove from queue and mark as in-flight
+        this.items.splice(idx, 1);
+        this.inFlightCount++;
+        this.inFlightUrls.add(normalizedCandidateUrl);
+        this.ctx.state.setAssetStatus(candidate.asset.url, "fetching");
+        return candidate.asset;
+      }
+      // This item is already being processed — skip it
+      this.ctx.logger.debug(
+        `Queue: skipping in-flight duplicate ${normalizedCandidateUrl}`
+      );
+      idx++;
+    }
+
+    return null;
   }
 
   /**
@@ -118,6 +137,7 @@ export class AssetQueue {
    */
   markComplete(url: string): void {
     this.inFlightCount = Math.max(0, this.inFlightCount - 1);
+    this.inFlightUrls.delete(normalizeUrl(url));
     this.ctx.logger.debug(`Queue: slot freed (in-flight: ${this.inFlightCount})`);
   }
 

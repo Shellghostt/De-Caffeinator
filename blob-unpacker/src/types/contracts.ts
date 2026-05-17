@@ -92,7 +92,8 @@ export type DeobfuscationTechnique =
   | "control_flow_unflatten"
   | "iife_alias_resolve"
   | "library_detect"
-  | "context_rename";
+  | "context_rename"
+  | "webcrack";
 
 export interface WebpackModule {
   /** Module ID as used in the Webpack registry (numeric or string) */
@@ -199,6 +200,7 @@ export interface AssetState {
   status: AssetProcessingStatus;
   error?: string;
   completed_at?: string;
+  reconstruction_type?: "full" | "partial" | "none";
 }
 
 // ----------------------------------------------------------

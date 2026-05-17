@@ -85,7 +85,7 @@ export function partialReconstruct(
   if (knownPaths.length > 0) {
     const manifest = buildStructureManifest(knownPaths, recoveredFiles, recoveredCount);
     recoveredFiles.push({
-      path: "_project_structure.md",
+      path: "_project_structure.json",
       content: manifest,
     });
   }
@@ -255,39 +255,31 @@ function buildStructureManifest(
 ): string {
   const recoveredPaths = new Set(recoveredFiles.map((f) => f.path));
 
-  // Build a tree visualization
-  const tree = new Map<string, string[]>();
+  // Build a nested tree structure
+  const tree: any = {};
   for (const p of knownPaths) {
-    const parts = p.split("/");
-    const dir = parts.slice(0, -1).join("/") || "(root)";
-    const file = parts[parts.length - 1];
-    if (!tree.has(dir)) tree.set(dir, []);
-    tree.get(dir)!.push(file);
-  }
-
-  const lines: string[] = [
-    "# Project Structure (recovered from source map)",
-    "",
-    `**Total source files:** ${knownPaths.length}`,
-    `**Files with content:** ${recoveredFiles.filter((f) => !f.path.endsWith(".fragments.js") && !f.path.startsWith("_")).length}`,
-    `**Identifiers recovered:** ${recoveredNameCount}`,
-    "",
-    "## Directory Tree",
-    "",
-  ];
-
-  const sortedDirs = [...tree.entries()].sort(([a], [b]) => a.localeCompare(b));
-  for (const [dir, files] of sortedDirs) {
-    lines.push(`### ${dir}/`);
-    for (const file of files.sort()) {
-      const fullPath = dir === "(root)" ? file : `${dir}/${file}`;
-      const status = recoveredPaths.has(fullPath) ? "✅" : "❌";
-      lines.push(`- ${status} ${file}`);
+    const parts = p.split(/[/\\]/);
+    let current = tree;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!current[part]) current[part] = {};
+      current = current[part];
     }
-    lines.push("");
+    const file = parts[parts.length - 1];
+    current[file] = { type: "file", recovered: recoveredPaths.has(p) };
   }
 
-  return lines.join("\n");
+  const manifest = {
+    coverage: "partial",
+    total_source_files: knownPaths.length,
+    files_with_content: recoveredFiles.filter(
+      (f) => !f.path.endsWith(".fragments.js") && !f.path.startsWith("_")
+    ).length,
+    identifiers_recovered: recoveredNameCount,
+    directory_tree: tree,
+  };
+
+  return JSON.stringify(manifest, null, 2);
 }
 
 // ----------------------------------------------------------
