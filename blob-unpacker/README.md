@@ -2,7 +2,7 @@
 
 **A production-grade JavaScript reverse engineering and asset analysis pipeline for security auditing.**
 
-Blob Unpacker crawls a target website, downloads every JavaScript file it can find, de-obfuscates and de-minifies them using 12 different AST-based transforms, and then extracts security-relevant artifacts — API endpoints, secrets, developer comments, and configuration values. All output is organized into clean per-hostname directories ready for analysis.
+Blob Unpacker crawls a target website, downloads every JavaScript file it can find, de-obfuscates and de-minifies them using the powerful webcrack engine, and then extracts security-relevant artifacts — API endpoints, secrets, developer comments, and configuration values. All output is organized into clean per-hostname directories ready for analysis.
 
 ---
 
@@ -36,12 +36,12 @@ Blob Unpacker crawls a target website, downloads every JavaScript file it can fi
 ## Features
 
 - **Automated JS Discovery** — Crawls HTML pages, follows same-origin links, parses Webpack chunk IDs, and fetches Next.js `_buildManifest.js` to find every JavaScript file on a target site.
-- **12 De-obfuscation Transforms** — Eval unpacking, string array resolution, hex call resolution, unicode decoding, constant folding, IIFE alias resolution, context-based variable renaming, dead code elimination, control flow unflattening, bundle splitting, library detection, and beautification.
+- **Webcrack De-obfuscation** — Powered by the modern `webcrack` engine to automatically unbundle Webpack/Browserify modules, resolve obfuscator.io string arrays, fold constants, and remove dead code.
 - **Source Map Recovery** — Automatically probes for `.map` files and reconstructs original TypeScript/React source code when available.
-- **Security Artifact Extraction** — Discovers API endpoints, hardcoded secrets, developer comments, and environment configuration values.
-- **Per-Hostname Output** — Each scanned website gets its own output directory with deobfuscated JS, extracted artifacts, and a human-readable summary report.
-- **Recursive Unpacking** — If code is still packed after a full pass, Stage 4 re-runs automatically (up to a configurable depth).
-- **Library Fingerprinting** — Identifies 20+ known libraries (jQuery, React, easyXDM, Lodash, etc.) and annotates them in the output.
+- **Security Artifact Extraction** — Discovers API endpoints, hardcoded secrets, developer comments, and environment configuration values using fast `acorn` AST parsing.
+- **Clean Per-Hostname Output** — Each scanned website gets its own output directory. Third-party assets are neatly segregated into a `third-party/` subfolder to keep the primary target analysis focused.
+- **Recursive Unpacking** — If code is still explicitly packed (e.g., using `eval()` or dean edwards packing) after a full pass, Stage 4 unwraps it and re-runs automatically (up to a configurable depth).
+- **False-Positive Filtered Secrets** — Entropy-based secret detection tuned with robust heuristics to filter out hashes, CSS class names, and common false positives.
 - **Content-Hash Deduplication** — Same JS file across multiple pages is only processed once.
 
 ---
@@ -79,8 +79,6 @@ python run.py
 cd blob-unpacker
 npm install
 ```
-
-This installs all required dependencies including Babel (for AST transforms), js-beautify, source-map parser, and the HTTP client.
 
 ---
 
@@ -126,32 +124,13 @@ npx ts-node src/index.ts <url> [options]
 | `--no-files` | | | Don't write source/deobfuscated files |
 | `--user-agent <str>` | | | Custom User-Agent string |
 
-### Examples
-
-```bash
-# Basic scan
-npx ts-node src/index.ts https://example.com
-
-# Full scan with custom output
-npx ts-node src/index.ts https://example.com -o ./results -d 3 -p 100
-
-# Deep scan with high concurrency
-npx ts-node src/index.ts https://example.com --depth 5 --pages 500 -c 10
-
-# Stealth mode — slow and polite
-npx ts-node src/index.ts https://example.com -c 2 --delay 1000 --timeout 30000
-
-# Skip chunk discovery, JSONL output
-npx ts-node src/index.ts https://example.com --no-chunks -f jsonl
-```
-
 ---
 
 ## Pipeline Architecture
 
 Blob Unpacker processes JavaScript through a 6-stage pipeline. Each asset flows through the stages independently, with concurrency managed by an internal queue.
 
-```
+```text
                        ┌─────────────────────┐
                        │    CLI / run.py      │
                        │    src/index.ts      │
@@ -181,24 +160,24 @@ Blob Unpacker processes JavaScript through a 6-stage pipeline. Each asset flows 
                     map found       no map
                          │              │
               ┌──────────▼──────┐ ┌─────▼────────────┐
-              │  Stage 3:       │ │  Stage 4:          │
-              │  Reconstruction │ │  De-obfuscation    │◄─┐
-              │  (source map)   │ │  (12 transforms)   │──┘ recursive
+              │  Stage 3:       │ │  Stage 4:        │
+              │  Reconstruction │ │  De-obfuscation  │◄─┐
+              │  (source map)   │ │  (webcrack)      │──┘ recursive
               └──────┬──────────┘ └─────┬────────────┘    if still packed
-                     │                  │
+                     │                  │                 (e.g., eval wrappers)
                      │  unmapped chunks │
                      │        ├─────────┘
                      │        │
               ┌──────▼────────▼─────────┐
-              │  Stage 5: Extraction     │
-              │  Endpoints, secrets,     │
-              │  comments, configs       │
+              │  Stage 5: Extraction    │
+              │  Endpoints, secrets,    │
+              │  comments, configs      │
               └──────────┬──────────────┘
                          │
               ┌──────────▼──────────────┐
-              │  Stage 6: Output         │
-              │  Per-hostname dirs,      │
-              │  JSON, reports, summary  │
+              │  Stage 6: Output        │
+              │  Per-hostname dirs,     │
+              │  JSON, reports, summary │
               └─────────────────────────┘
 ```
 
@@ -236,59 +215,52 @@ Any portions that couldn't be mapped are forwarded to Stage 4 as unmapped chunks
 
 ### Stage 4 — De-obfuscation & De-minification
 
-The core processing engine. Applies **12 transforms** in optimal order via Babel AST:
+The core processing engine. Relies on the modern, high-performance **webcrack** engine to analyze and unpack complex minified bundles:
 
-| # | Transform | What It Does |
-|---|-----------|-------------|
-| 1 | Eval Unpacking | Extracts payloads from `eval(function(p,a,c,k,e,d){...})` wrappers |
-| 2 | Hex Call Resolution | Resolves `_0x1a2b('0x1f')` → original string values |
-| 3 | String Array Resolution | Replaces array-index lookups with the actual strings |
-| 4 | Unicode Decoding | Converts `\u0048\u0065\u006C\u006C\u006F` → `Hello` |
-| 5 | Constant Folding | Evaluates `"hel" + "lo"` → `"hello"`, `1 + 2 * 3` → `7` |
-| 5b | **IIFE Alias Resolution** | `(function(N,d){...})(window,document)` → replaces `N`→`window`, `d`→`document` |
-| 5c | **Context-Based Renaming** | Infers `n.createElement("div")` → `document.createElement("div")` from usage patterns |
-| 6 | Dead Code Elimination | Removes `if(false){...}`, unreachable branches |
-| 7 | Control Flow Unflattening | Reverses switch-case state machine obfuscation |
-| 8 | Bundle Splitting | Splits Webpack/Rollup/Vite bundles into individual modules |
-| 8b | **Library Detection** | Fingerprints 20+ libraries (jQuery, React, easyXDM, etc.) and annotates them |
-| 9 | Beautification | Final formatting with consistent indentation |
+- **Bundle Splitting** — Identifies and unpacks Webpack and Browserify bundles, separating them into individual modules.
+- **Obfuscator Reversal** — Automatically resolves obfuscator.io patterns, including string array rotation and control flow flattening.
+- **Constant Folding & Unicode Decoding** — Evaluates constants and reverts hex/unicode encoded identifiers back to readable strings.
+- **Beautification** — Final formatting with consistent indentation.
 
-**Recursion Rule:** If the output is still detected as packed (eval wrappers, `p,a,c,k,e,d` patterns), Stage 4 feeds its own output back in — up to `--deobf-depth` times (default: 5).
+**Recursion Rule:** The 'isPacked' heuristic looks for explicit packing wrappers (e.g., `eval(function(p,a,c,k,e,d)...)`). If detected, it unwraps the payload and feeds it back into Stage 4 — up to `--deobf-depth` times (default: 5).
 
 ### Stage 5 — Artifact Extraction
 
-Runs four independent extractors on the readable code:
+Runs four independent extractors on the readable code, powered by fast `acorn` AST parsing (completely avoiding regexes on raw code where possible):
 
 | Extractor | Finds | Confidence Levels |
 |-----------|-------|-------------------|
 | **Endpoint Extractor** | `fetch()`, `axios`, `$.ajax()`, XHR `.open()`, route definitions | High / Medium / Low |
-| **Secret Extractor** | API keys, JWTs, private keys, DB URLs, bearer tokens | Based on Shannon entropy + pattern matching |
-| **Comment Extractor** | `TODO`, `FIXME`, `password`, `hack`, internal notes | Category-based |
+| **Secret Extractor** | API keys, JWTs, private keys, DB URLs, bearer tokens | Based on Shannon entropy + heuristics |
+| **Comment Extractor** | `TODO`, `FIXME`, `password`, `hack`, internal notes | AST Comment Node categorization |
 | **Config Extractor** | `process.env.*`, `__NEXT_DATA__`, feature flags | Key-value pairs |
 
 ### Stage 6 — Output
 
-Organizes all findings into per-hostname directories. Each website gets its own folder containing deobfuscated JS, extracted artifacts, JSON reports, and a human-readable summary.
+Organizes all findings into per-hostname directories. Primary target assets are kept in the root, while third-party scripts (e.g., Google Analytics, Intercom) are cleanly segregated into a `third-party/` subfolder.
 
 ---
 
 ## Output Structure
 
-```
+```text
 output/
 ├── index.json                    # Global summary of all scanned hosts
 ├── run-report.json               # Aggregate pipeline stats
 ├── pipeline.log.jsonl            # Full structured event log
 └── <hostname>/                   # One folder per website
-    ├── deobfuscated/             # Beautified + de-obfuscated JS
-    │   ├── main-chunk.js
-    │   └── vendor-chunk.js
-    ├── raw/                      # Original downloaded JS (if different)
+    ├── deobfuscated/             # Beautified + de-obfuscated JS for primary target
+    │   └── main-chunk.js
+    ├── raw/                      # Original downloaded JS
     ├── sources/                  # Source-map reconstructed files
     │   └── <hash>/
     │       ├── src/App.tsx
-    │       ├── src/utils.ts
-    │       └── _file_index.txt
+    │       └── src/utils.ts
+    ├── third-party/              # Clean segregation of 3rd party assets
+    │   ├── deobfuscated/
+    │   │   └── analytics.js
+    │   └── raw/
+    │       └── analytics.js
     ├── manifests/
     │   ├── endpoints-contract.json
     │   └── artifacts-contract.json
@@ -305,23 +277,17 @@ output/
 
 ## De-obfuscation Techniques
 
-### Obfuscation Reversal
-- **Eval/Packer Unwrapping** — Safely extracts code hidden inside `eval()`, `new Function()`, and Dean Edwards packer (`p,a,c,k,e,d`) wrappers
-- **Hex Function Call Resolution** — Resolves encoded function calls like `window['\x61\x6c\x65\x72\x74']()` → `window.alert()`
-- **String Array Resolution** — Replaces obfuscator.io-style string array lookups with the actual string values
-- **Unicode/Hex String Decoding** — Converts `\u0041` back to `A` across all string literals
-- **Control Flow Unflattening** — Reconstructs linear code from switch-case state machine patterns used by advanced obfuscators
+### Obfuscation Reversal 
+- **Eval/Packer Unwrapping** — Safely extracts code hidden inside `eval()`, `new Function()`, and Dean Edwards packer (`p,a,c,k,e,d`) wrappers.
+- **Obfuscator.io Reversal** — Automatically resolves string arrays, un-rotates array indices, and simplifies control flow flattening.
+- **Hex/Unicode String Decoding** — Converts `\u0041` and `_0x1a2b` back to readable strings.
+- **Control Flow Unflattening** — Reconstructs linear code from switch-case state machine patterns used by advanced obfuscators.
 
-### De-minification
-- **IIFE Parameter Alias Resolution** — When a minifier wraps code in `(function(w,d,l){...})(window,document,location)`, restores all parameter aliases to their original global names. Supports 110+ known globals.
-- **Context-Based Variable Renaming** — Infers variable identities from usage patterns. If a single-letter variable calls `.createElement()`, `.getElementById()`, and `.querySelector()`, it's renamed to `document`. Covers 12 context rules for `document`, `window`, `console`, `JSON`, `Math`, `Object`, `Array`, `Promise`, `navigator`, `location`, `history`, and `localStorage`.
-
-### Code Cleanup
-- **Constant Folding** — Evaluates compile-time-constant expressions (`"hel" + "lo"` → `"hello"`)
-- **Dead Code Elimination** — Removes unreachable code paths (`if(false){...}`, `if(1===2){...}`)
-- **Bundle Splitting** — Separates Webpack/Rollup/Vite/Turbopack bundles into individual module files
-- **Library Detection** — Fingerprints 20+ libraries and adds banner comments identifying them
-- **Beautification** — Consistent indentation and formatting via js-beautify
+### Code Cleanup & Splitting
+- **Bundle Splitting** — Separates Webpack/Browserify bundles into individual module files, drastically improving readability of large single-page applications.
+- **Constant Folding** — Evaluates compile-time-constant expressions (`"hel" + "lo"` → `"hello"`).
+- **Dead Code Elimination** — Removes unreachable code paths (`if(false){...}`).
+- **Beautification** — Consistent indentation and formatting via js-beautify.
 
 ---
 
@@ -337,17 +303,16 @@ Discovers API endpoints from:
 - Express-style route patterns
 
 ### Secrets
-Detects via pattern matching + Shannon entropy scoring:
+Detects via AST traversal + Shannon entropy scoring (with strict false-positive filtering):
 - API keys (AWS, Google, Stripe, etc.)
 - JWT tokens and secrets
 - Database connection strings
 - Private keys (RSA, EC)
 - Bearer tokens
 - Hardcoded credentials
-- High-entropy unknown strings
 
 ### Comments
-Flags security-relevant developer comments containing:
+Parses the Abstract Syntax Tree (AST) to extract real developer comments (ignoring object properties or variable names) and flags those containing:
 - `TODO`, `FIXME`, `HACK`, `XXX`
 - `password`, `secret`, `credential`
 - `internal`, `deprecated`, `insecure`
@@ -363,7 +328,7 @@ Extracts configuration values from:
 
 ## Project Structure
 
-```
+```text
 blob-unpacker/
 ├── run.py                          # Interactive Python launcher
 ├── package.json                    # Node.js dependencies
@@ -381,53 +346,30 @@ blob-unpacker/
     ├── stages/
     │   ├── 1-ingestion/
     │   │   ├── index.ts            # runIngestion() entry point
-    │   │   ├── crawler-adapter.ts  # Multi-phase crawl orchestration
-    │   │   ├── link-follower.ts    # Same-origin <a href> BFS
-    │   │   ├── chunk-discoverer.ts # Webpack chunk ID extraction
-    │   │   ├── classifier.ts       # Asset type classification
-    │   │   └── spider-adapter.ts   # Spider mode adapter
+    │   │   └── ...                 # Web crawlers, link followers, chunk discoverers
     │   ├── 2-map-detection/
     │   │   ├── index.ts            # detectMap() entry point
-    │   │   ├── comment-scanner.ts  # sourceMappingURL parser
-    │   │   ├── header-inspector.ts # HTTP header check
-    │   │   └── path-inferrer.ts    # .map URL inference
+    │   │   └── ...                 # Comment scanners, HTTP headers, path inference
     │   ├── 3-reconstruction/
     │   │   ├── index.ts            # reconstruct() entry point
-    │   │   ├── full-reconstructor.ts
-    │   │   ├── partial-reconstructor.ts
-    │   │   ├── map-parser.ts       # Source map JSON parser
-    │   │   ├── vlq-decoder.ts      # VLQ base64 decoder
-    │   │   ├── name-recovery.ts    # Variable name recovery
-    │   │   └── source-writer.ts    # File writer → sources/<hash>/
+    │   │   └── ...                 # VLQ decoding, source extractors
     │   ├── 4-deobfuscation/
-    │   │   ├── index.ts            # deobfuscate() entry point
-    │   │   ├── eval-unpacker.ts    # eval/packer unwrapping
-    │   │   ├── hex-call-resolver.ts
-    │   │   ├── string-array-resolver.ts
-    │   │   ├── unicode-decoder.ts
-    │   │   ├── constant-folder.ts
-    │   │   ├── iife-alias-resolver.ts   # NEW: IIFE param aliasing
-    │   │   ├── context-renamer.ts       # NEW: Usage-based renaming
-    │   │   ├── dead-code-eliminator.ts
-    │   │   ├── control-flow-unflattener.ts
-    │   │   ├── bundle-splitter.ts
-    │   │   ├── webpack-splitter.ts
-    │   │   ├── library-detector.ts      # NEW: Library fingerprinting
-    │   │   └── beautifier.ts
+    │   │   ├── index.ts            # deobfuscate() entry point (webcrack wrapper)
+    │   │   ├── eval-unpacker.ts    # Unwrapping eval payloads
+    │   │   └── beautifier.ts       # Code formatting
     │   ├── 5-extraction/
     │   │   ├── index.ts            # extract() entry point
+    │   │   ├── ast-extractor.ts    # Base acorn traversal class
     │   │   ├── endpoint-extractor.ts
-    │   │   ├── secret-extractor.ts
-    │   │   ├── comment-extractor.ts
+    │   │   ├── secret-extractor.ts # Entropy and heuristic filtering
+    │   │   ├── comment-extractor.ts# True comment extraction
     │   │   ├── config-extractor.ts
-    │   │   ├── ast-extractor.ts    # Deep Babel AST walk
     │   │   └── entropy.ts          # Shannon entropy scorer
     │   └── 6-output/
     │       ├── index.ts            # writeOutputs() — per-host grouping
-    │       ├── deobfuscated-writer.ts
     │       └── schema.ts           # Output schema definitions
     └── types/
-        └── contracts.ts            # All shared TypeScript interfaces
+        └── contracts.ts            # Shared TypeScript interfaces
 ```
 
 ---
@@ -437,9 +379,8 @@ blob-unpacker/
 | Component | Technology |
 |-----------|-----------|
 | **Runtime** | Node.js / TypeScript |
-| **AST Parsing** | `@babel/parser` |
-| **AST Transforms** | `@babel/traverse`, `@babel/types` |
-| **Code Generation** | `@babel/generator` |
+| **AST Parsing** | `acorn`, `acorn-walk` |
+| **De-obfuscation Engine** | `webcrack` |
 | **Beautification** | `js-beautify` |
 | **Source Maps** | `source-map` |
 | **Schema Validation** | `zod` |
@@ -454,11 +395,9 @@ blob-unpacker/
 
 2. **No Headless Browser** — For sites that require JavaScript execution to render content (heavy SPAs), a Puppeteer/Playwright integration would improve coverage.
 
-3. **Context Renaming is Heuristic** — The variable renamer uses usage pattern analysis, not data flow analysis. It requires multiple signals before renaming to avoid false positives. Some minified variables may not be renamed if their usage is ambiguous.
+3. **Secret Detection False Positives** — High-entropy strings (like CSS class hashes or content hashes) may occasionally be flagged as potential secrets, although the strict false-positive heuristics mitigate most of this. The entropy threshold (`--entropy`) can be tuned.
 
-4. **Secret Detection False Positives** — High-entropy strings (like CSS class hashes or content hashes) may be flagged as potential secrets. The entropy threshold (`--entropy`) can be tuned.
-
-5. **No Authentication** — The crawler does not support authenticated sessions. Pages behind login walls are not crawled.
+4. **No Authentication** — The crawler does not support authenticated sessions. Pages behind login walls are not crawled.
 
 ---
 

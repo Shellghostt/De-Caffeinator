@@ -1,8 +1,13 @@
 // ============================================================
-// STAGE 5 — COMMENT EXTRACTOR (Enhanced)
+// STAGE 5 — COMMENT EXTRACTOR (AST-powered)
 // Extracts developer comments that signal security-relevant
 // information: TODOs, FIXMEs, auth bypasses, debug notes,
 // vulnerability mentions, permission issues, and general notes.
+//
+// Uses Acorn's onComment callback to capture ONLY actual
+// JavaScript comments (CommentLine and CommentBlock AST nodes).
+// This avoids false positives from regex matching minified code
+// lines that happen to contain "//" in URLs or string literals.
 //
 // Categories:
 //   todo   — TODO items left by developers
@@ -13,6 +18,7 @@
 //   note   — General developer notes with useful context
 // ============================================================
 
+import * as acorn from "acorn";
 import { DiscoveredComment, CommentCategory } from "../../types/contracts";
 
 interface CommentRule {
@@ -70,10 +76,14 @@ const RULES: CommentRule[] = [
 const SECURITY_KEYWORDS =
   /\b(?:auth(?:entication|orization)?|permission|credential|token|secret|password|encrypt|decrypt|hash|salt|session|cookie|csrf|xss|injection|privilege|escalat|sanitiz|validat|whitelist|blacklist|allowlist|denylist|firewall|ssl|tls|certificate|cors|origin|header|vulnerability|exploit|attack|threat|breach|leak|expos)/i;
 
-// Matches single-line and inline comments
-const SINGLE_LINE_RE = /\/\/(.+)/g;
-// Matches block comments
-const BLOCK_RE = /\/\*([\s\S]*?)\*\//g;
+/** Raw comment as captured by Acorn's onComment callback */
+interface AcornComment {
+  type: "Line" | "Block";
+  value: string;
+  start: number;
+  end: number;
+  loc?: { start: { line: number; column: number }; end: { line: number; column: number } };
+}
 
 export function extractComments(
   code: string,
@@ -82,6 +92,38 @@ export function extractComments(
   const results: DiscoveredComment[] = [];
   const seen = new Set<string>();
 
+  // ── Collect comments via Acorn AST parser ──────────────────
+  // This guarantees we only get actual JS comments (CommentLine
+  // and CommentBlock), NOT code statements or object properties.
+  const comments: AcornComment[] = [];
+
+  try {
+    acorn.parse(code, {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      allowHashBang: true,
+      locations: true,
+      onComment: comments as any,
+    });
+  } catch {
+    // Module mode failed — try script mode
+    comments.length = 0;
+    try {
+      acorn.parse(code, {
+        ecmaVersion: 2022,
+        sourceType: "script",
+        allowHashBang: true,
+        locations: true,
+        onComment: comments as any,
+      });
+    } catch {
+      // Parse failed entirely — return empty rather than falling back to regex
+      // which would produce the false positives we're trying to avoid
+      return results;
+    }
+  }
+
+  // ── Classify each genuine comment ──────────────────────────
   const check = (text: string, line: number) => {
     const trimmed = text.trim()
       .replace(/^\*\s*/, "") // strip leading * from block comments
@@ -106,24 +148,18 @@ export function extractComments(
     }
   };
 
-  let match: RegExpExecArray | null;
+  for (const comment of comments) {
+    const line = comment.loc?.start?.line ?? 1;
 
-  SINGLE_LINE_RE.lastIndex = 0;
-  while ((match = SINGLE_LINE_RE.exec(code)) !== null) {
-    check(match[1], getLineNumber(code, match.index));
-  }
-
-  BLOCK_RE.lastIndex = 0;
-  while ((match = BLOCK_RE.exec(code)) !== null) {
-    // Split block into lines and check each
-    const blockLines = match[1].split("\n");
-    const startLine = getLineNumber(code, match.index);
-    blockLines.forEach((l, i) => check(l, startLine + i));
+    if (comment.type === "Line") {
+      // Single-line comment: // ...
+      check(comment.value, line);
+    } else if (comment.type === "Block") {
+      // Block comment: /* ... */ — check each line separately
+      const blockLines = comment.value.split("\n");
+      blockLines.forEach((l, i) => check(l, line + i));
+    }
   }
 
   return results;
-}
-
-function getLineNumber(code: string, index: number): number {
-  return code.slice(0, index).split("\n").length;
 }

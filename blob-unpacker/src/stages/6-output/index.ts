@@ -76,7 +76,7 @@ export async function writeOutputs(ctx: PipelineContext): Promise<void> {
   // All findings (first-party + third-party) go into one set of files
   // so you don't have to hunt across subdirectories.
   writeDataFile(path.join(targetDir, `endpoints.${format}`), allEndpoints, format);
-  writeDataFile(path.join(targetDir, `secrets.${format}`),   allSecrets,   format);
+  // writeDataFile(path.join(targetDir, `secrets.${format}`),   allSecrets,   format);
   writeDataFile(path.join(targetDir, `comments.${format}`),  allComments,  format);
   writeDataFile(path.join(targetDir, `configs.${format}`),   allConfigs,   format);
 
@@ -127,7 +127,7 @@ export async function writeOutputs(ctx: PipelineContext): Promise<void> {
   writeJsonFile(path.join(outDir, "run-report.json"), report);
 
   ctx.logger.info(
-    `Stage 6: wrote ${allEndpoints.length} endpoints, ${allSecrets.length} secrets, ` +
+    `Stage 6: wrote ${allEndpoints.length} endpoints, ` +
       `${allComments.length} comments, ${allConfigs.length} configs ` +
       `(${thirdPartyHosts.length} third-party domain(s))`,
     { stage: "stage-6" }
@@ -216,8 +216,11 @@ function enrichRunReport(
   ctx: PipelineContext
 ): void {
   const states = ctx.state.getAllAssetStates();
-  // Count reconstruction types from state tracking
-  // (These were TODO in the original — now populated)
+  
+  report.full_reconstructions = states.filter((s) => s.reconstruction_type === "full").length;
+  report.partial_reconstructions = states.filter((s) => s.reconstruction_type === "partial").length;
+  report.deobfuscated_only = states.filter((s) => s.reconstruction_type === "none").length;
+
   report.total_endpoints_found = ctx.results.getAllEndpoints().length;
   report.total_secrets_found = ctx.results.getAllSecrets().length;
 }
@@ -379,7 +382,6 @@ function generateSummaryReport(
   lines.push(`| Category | Count |`);
   lines.push(`|----------|-------|`);
   lines.push(`| API Endpoints | ${endpoints.length} |`);
-  lines.push(`| Secrets / Tokens | ${secrets.length} |`);
   lines.push(`| Developer Comments | ${comments.length} |`);
   lines.push(`| Configuration Values | ${configs.length} |`);
   lines.push("");
@@ -401,21 +403,7 @@ function generateSummaryReport(
     lines.push("");
   }
 
-  // ── Secrets ─────────────────────────────────────────────
-  if (secrets.length > 0) {
-    lines.push("## Discovered Secrets");
-    lines.push("");
-    lines.push("> [!CAUTION]");
-    lines.push("> Secret values are partially masked for safety.");
-    lines.push("");
-    lines.push("| Type | Value (masked) | Entropy | Source |");
-    lines.push("|------|----------------|---------|--------|");
-    for (const s of secrets.slice(0, 50)) {
-      const src = truncate(s.source_file, 40);
-      lines.push(`| ${s.type} | \`${s.value}\` | ${s.entropy} | ${src}:${s.line} |`);
-    }
-    lines.push("");
-  }
+  // ── Secrets (Removed by User Request) ───────────────────
 
   // ── Security Comments ───────────────────────────────────
   if (comments.length > 0) {

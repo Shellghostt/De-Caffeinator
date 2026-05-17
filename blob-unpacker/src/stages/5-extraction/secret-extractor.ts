@@ -1,7 +1,12 @@
 // ============================================================
-// STAGE 5 — SECRET EXTRACTOR (Enhanced)
+// STAGE 5 — SECRET EXTRACTOR (Enhanced + Filtered)
 // Finds hardcoded credentials, API keys, tokens, service keys.
 // Shannon entropy filtering prevents false-positive explosion.
+//
+// FALSE POSITIVE FILTERS (3-layer noise reduction):
+//   1. Known Alphabets — Base64 charset, hex charset, etc.
+//   2. Context Variables — _keyStr, alphabet, chars, encoding
+//   3. Known Prefixes  — sk_live_, AKIA, ghp_, etc. (boosted)
 //
 // Categories:
 //   - api_key:              Generic API keys
@@ -172,6 +177,126 @@ const FAKE_VALUES = new Set([
 // Patterns that indicate a variable reference, not a real secret
 const VARIABLE_REF_RE = /^(?:process\.env\.|window\.|import\.meta\.|__)/;
 
+// ============================================================
+// FALSE POSITIVE FILTER 1: Known Encoding Alphabets
+// Base64, hex, and other charset strings have extremely high
+// entropy but are never real secrets.
+// ============================================================
+const KNOWN_ALPHABETS = [
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=",
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+  "0123456789abcdef",
+  "0123456789ABCDEF",
+  "0123456789abcdefABCDEF",
+  "abcdefghijklmnopqrstuvwxyz",
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+];
+const KNOWN_ALPHABET_SET = new Set(KNOWN_ALPHABETS);
+
+// Also catch Base64 alphabets that are reordered or slightly varied
+const BASE64_ALPHABET_RE = /^[A-Za-z0-9+\/=\-_]{64,66}$/;
+function isEncodingAlphabet(value: string): boolean {
+  if (KNOWN_ALPHABET_SET.has(value)) return true;
+  // A string that is 64-66 chars and contains ALL of A-Z, a-z, 0-9
+  // is almost certainly a charset definition, not a secret
+  if (BASE64_ALPHABET_RE.test(value)) {
+    const hasUpper = /[A-Z]/.test(value);
+    const hasLower = /[a-z]/.test(value);
+    const hasDigit = /[0-9]/.test(value);
+    const uniqueChars = new Set(value).size;
+    if (hasUpper && hasLower && hasDigit && uniqueChars >= 62) return true;
+  }
+  return false;
+}
+
+// ============================================================
+// FALSE POSITIVE FILTER 2: Contextual Variable Name Filter
+// If the surrounding code assigns the high-entropy string to
+// a variable named "_keyStr", "alphabet", "chars", etc., it's
+// an encoding definition, not a leaked credential.
+// ============================================================
+const ENCODING_CONTEXT_NAMES = [
+  "_keyStr", "keyStr", "alphabet", "ALPHABET", "chars", "CHARS",
+  "b64", "b64chars", "base64", "BASE64", "base64chars", "base64Chars",
+  "encoding", "ENCODING", "charset", "CHARSET", "charSet",
+  "digits", "DIGITS", "hexChars", "hexDigits", "lookup",
+  "toBase64", "fromBase64", "encodeChars", "decodeChars",
+  "urlSafe", "urlSafeBase64", "intToChar", "charToInt",
+];
+function isEncodingContext(contextSnippet: string): boolean {
+  return ENCODING_CONTEXT_NAMES.some((name) => contextSnippet.includes(name));
+}
+
+// ============================================================
+// FALSE POSITIVE FILTER 3: Known Secret Prefixes (Booster)
+// Real API keys from major services have recognizable prefixes.
+// These get flagged as HIGH confidence regardless of entropy.
+// ============================================================
+interface KnownPrefix {
+  prefix: string;
+  service: string;
+  type: SecretType;
+}
+const KNOWN_PREFIXES: KnownPrefix[] = [
+  { prefix: "sk_live_",     service: "Stripe (live)",     type: "api_key" },
+  { prefix: "sk_test_",     service: "Stripe (test)",     type: "api_key" },
+  { prefix: "pk_live_",     service: "Stripe (live pub)", type: "api_key" },
+  { prefix: "pk_test_",     service: "Stripe (test pub)", type: "api_key" },
+  { prefix: "AKIA",         service: "AWS Access Key",    type: "api_key" },
+  { prefix: "ghp_",         service: "GitHub PAT",        type: "api_key" },
+  { prefix: "ghs_",         service: "GitHub App",        type: "api_key" },
+  { prefix: "gho_",         service: "GitHub OAuth",      type: "api_key" },
+  { prefix: "github_pat_",  service: "GitHub Fine-grained", type: "api_key" },
+  { prefix: "glpat-",       service: "GitLab PAT",        type: "api_key" },
+  { prefix: "xox",          service: "Slack",             type: "api_key" },
+  { prefix: "SG.",          service: "SendGrid",          type: "api_key" },
+  { prefix: "AIza",         service: "Google/Firebase",   type: "api_key" },
+  { prefix: "pk.eyJ",       service: "Mapbox",            type: "api_key" },
+  { prefix: "sk.eyJ",       service: "Mapbox (secret)",   type: "api_key" },
+  { prefix: "eyJ",          service: "JWT",               type: "jwt_secret" },
+  { prefix: "shpat_",       service: "Shopify",           type: "api_key" },
+  { prefix: "shpss_",       service: "Shopify Shared",    type: "api_key" },
+  { prefix: "AC",           service: "Twilio",            type: "api_key" },
+  { prefix: "npm_",         service: "npm",               type: "api_key" },
+  { prefix: "pypi-",        service: "PyPI",              type: "api_key" },
+  { prefix: "sq0csp-",      service: "Square",            type: "api_key" },
+  { prefix: "sqOatp-",      service: "Square OAuth",      type: "api_key" },
+  { prefix: "hf_",          service: "Hugging Face",      type: "api_key" },
+];
+
+function matchKnownPrefix(value: string): KnownPrefix | null {
+  for (const kp of KNOWN_PREFIXES) {
+    if (value.startsWith(kp.prefix)) return kp;
+  }
+  return null;
+}
+
+// ============================================================
+// MASTER FALSE-POSITIVE CHECK
+// Runs all three filters on every candidate.
+// Returns true if the value should be SKIPPED.
+// ============================================================
+function isFalsePositive(value: string, contextSnippet: string): boolean {
+  // Filter 1: Known encoding alphabets
+  if (isEncodingAlphabet(value)) return true;
+
+  // Filter 2: Encoding-related variable names in context
+  if (isEncodingContext(contextSnippet)) return true;
+
+  // Common library constants (hashes, charset tables)
+  if (/^[0-9a-f]{32,64}$/i.test(value)) {
+    // Looks like an MD5/SHA hash — only flag if context mentions secret/key
+    if (!/(?:key|secret|token|password|credential|auth)/i.test(contextSnippet)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function extractSecrets(
   code: string,
   sourceFile: string,
@@ -181,6 +306,37 @@ export function extractSecrets(
   const results: DiscoveredSecret[] = [];
   const lines = code.split("\n");
 
+  // ── Pass 1: Known-prefix scan (highest confidence) ─────────
+  // Scan the entire code for strings matching known service prefixes.
+  // These bypass entropy checks entirely — the prefix IS the signal.
+  const PREFIX_SCAN_RE = /["'`]([A-Za-z0-9_\-./+=]{16,256})["'`]/g;
+  PREFIX_SCAN_RE.lastIndex = 0;
+  let prefixMatch: RegExpExecArray | null;
+  while ((prefixMatch = PREFIX_SCAN_RE.exec(code)) !== null) {
+    const value = prefixMatch[1];
+    if (seen.has(value)) continue;
+
+    const kp = matchKnownPrefix(value);
+    if (!kp) continue;
+
+    const line = getLineNumber(code, prefixMatch.index);
+    const context = getContext(lines, line);
+
+    // Even known-prefix matches can be false positives in context
+    if (isFalsePositive(value, context)) continue;
+
+    seen.add(value);
+    results.push({
+      type: kp.type,
+      value: maskSecret(value),
+      entropy: parseFloat(shannonEntropy(value).toFixed(3)),
+      context_snippet: context,
+      source_file: sourceFile,
+      line,
+    });
+  }
+
+  // ── Pass 2: Pattern-based extraction ───────────────────────
   for (const pattern of PATTERNS) {
     pattern.re.lastIndex = 0;
     let match: RegExpExecArray | null;
@@ -198,20 +354,25 @@ export function extractSecrets(
       const effectiveMinEntropy = pattern.minEntropy ?? minEntropy;
       if (entropy < effectiveMinEntropy) continue;
 
-      seen.add(value);
       const line = getLineNumber(code, match.index);
+      const context = getContext(lines, line);
+
+      // ── Apply false-positive filters ──────────────────────
+      if (isFalsePositive(value, context)) continue;
+
+      seen.add(value);
       results.push({
         type: pattern.type,
         value: maskSecret(value),
         entropy: parseFloat(entropy.toFixed(3)),
-        context_snippet: getContext(lines, line),
+        context_snippet: context,
         source_file: sourceFile,
         line,
       });
     }
   }
 
-  // ── High-entropy standalone string scan ─────────────────────
+  // ── Pass 3: High-entropy standalone string scan ────────────
   // Catch secrets that don't match specific patterns but have
   // suspiciously high entropy (random-looking strings)
   const HIGH_ENTROPY_RE = /["'`]([A-Za-z0-9+/=_\-]{32,128})["'`]/g;
@@ -230,6 +391,9 @@ export function extractSecrets(
     const line = getLineNumber(code, match.index);
     const context = getContext(lines, line);
     if (!/(?:key|secret|token|password|credential|auth|api)/i.test(context)) continue;
+
+    // ── Apply false-positive filters ──────────────────────
+    if (isFalsePositive(value, context)) continue;
 
     seen.add(value);
     results.push({

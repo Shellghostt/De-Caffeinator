@@ -122,8 +122,31 @@ async function fetchMapContent(
     }
 
     // Validate it looks like a source map JSON
-    const trimmed = res.body.trimStart();
-    if (!trimmed.startsWith("{")) {
+    let body = res.body;
+    const trimmed = body.trimStart();
+
+    // Reject HTML responses (SPA catch-all fallback serving index.html)
+    if (trimmed.startsWith("<")) {
+      ctx.logger.warn(`Stage 2: map response is HTML (SPA fallback), not JSON: ${mapUrl}`, {
+        stage: "stage-2",
+        asset_url: assetUrl,
+      });
+      return null;
+    }
+
+    // Handle Angular/AngularJS anti-XSSI prefix: )]}'\n
+    // Some frameworks prepend this to JSON responses to prevent XSSI attacks
+    const ANTI_XSSI_RE = /^\)]\}['"]?\s*\n/;
+    if (ANTI_XSSI_RE.test(trimmed)) {
+      body = trimmed.replace(ANTI_XSSI_RE, "");
+      ctx.logger.info(`Stage 2: stripped anti-XSSI prefix from map response`, {
+        stage: "stage-2",
+        asset_url: assetUrl,
+      });
+    }
+
+    const bodyTrimmed = body.trimStart();
+    if (!bodyTrimmed.startsWith("{")) {
       ctx.logger.warn(`Stage 2: map response does not look like JSON: ${mapUrl}`, {
         stage: "stage-2",
         asset_url: assetUrl,
@@ -132,7 +155,7 @@ async function fetchMapContent(
     }
 
     // Parse and validate Source Map v3 spec conformance
-    const validation = validateSourceMapJson(res.body);
+    const validation = validateSourceMapJson(body);
     if (!validation.valid) {
       ctx.logger.warn(
         `Stage 2: map validation failed for ${mapUrl}: ${validation.reason}`,
@@ -145,12 +168,12 @@ async function fetchMapContent(
           `Stage 2: proceeding with non-conformant map (recoverable)`,
           { stage: "stage-2", asset_url: assetUrl }
         );
-        return res.body;
+        return body;
       }
       return null;
     }
 
-    return res.body;
+    return body;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     ctx.logger.warn(`Stage 2: failed to fetch map ${mapUrl}: ${msg}`, {

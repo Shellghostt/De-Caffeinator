@@ -222,12 +222,20 @@ export class StateManager {
   }
 
   setAssetStatus(url: string, status: AssetProcessingStatus, error?: string): void {
+    const existing = this.state.asset_states[url] || {};
     this.state.asset_states[url] = {
+      ...existing,
       url,
       status,
       ...(error ? { error } : {}),
       ...(status === "complete" ? { completed_at: new Date().toISOString() } : {}),
     };
+    this.persist();
+  }
+
+  setAssetReconstructionType(url: string, type: "full" | "partial" | "none"): void {
+    const existing = this.state.asset_states[url] || { url, status: "queued" };
+    this.state.asset_states[url] = { ...existing, reconstruction_type: type };
     this.persist();
   }
 

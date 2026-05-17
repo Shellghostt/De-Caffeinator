@@ -93,8 +93,19 @@ export async function inferMapPath(
       asset_url: assetUrl,
     });
 
-    const { exists } = await headUrl(candidate, ctx);
+    const { exists, headers } = await headUrl(candidate, ctx);
     if (exists) {
+      // Reject SPA catch-all fallbacks: if the server returns text/html
+      // for a .map URL, it's the SPA's index.html, not a real source map.
+      const ct = headers["content-type"] ?? "";
+      if (ct.includes("text/html")) {
+        ctx.logger.debug(
+          `Path inferrer: ${candidate} returned text/html (SPA fallback) — skipping`,
+          { stage: "stage-2", asset_url: assetUrl }
+        );
+        continue;
+      }
+
       ctx.logger.info(`Path inferrer: found map at ${candidate}`, {
         stage: "stage-2",
         asset_url: assetUrl,

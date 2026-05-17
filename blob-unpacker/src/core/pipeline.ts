@@ -106,6 +106,10 @@ export class PipelineOrchestrator {
         // MAP FOUND → Stage 3
         this.ctx.state.setAssetStatus(url, "reconstructing");
         reconstructed = await this.runStage3(assetWithMap);
+        this.ctx.state.setAssetReconstructionType(
+          url,
+          reconstructed.coverage === "full" ? "full" : "partial"
+        );
 
         // OVERLAP RULE: partial reconstruction → also run Stage 4 on unmapped chunks
         if (
@@ -124,6 +128,7 @@ export class PipelineOrchestrator {
       } else {
         // NO MAP → Stage 4
         this.ctx.state.setAssetStatus(url, "deobfuscating");
+        this.ctx.state.setAssetReconstructionType(url, "none");
         deobfuscated = await this.runStage4(asset.raw_content, url);
       }
 

@@ -107,12 +107,26 @@ function unwrapFunctionConstructor(code: string): string | null {
   return match[1];
 }
 
-/** True if the code still contains packing patterns after one pass */
+/**
+ * True if the code still contains EXPLICIT obfuscation patterns after one pass.
+ *
+ * Only triggers on patterns that indicate deliberate code packing/obfuscation:
+ *   1. Dean Edwards p,a,c,k,e,r  — eval(function(p,a,c,k,e,d){...})
+ *   2. Obfuscator.io hex arrays   — large _0x variable arrays used for string hiding
+ *
+ * Standard minified variable names (e, t, n, r, ...) and legitimate uses of
+ * `new Function(...)`, `eval(atob(...))` etc. in framework code do NOT trigger this.
+ * This prevents minified-but-not-obfuscated libraries (Angular, React, jQuery)
+ * from causing infinite Stage 4 recursion loops.
+ */
 export function isStillPacked(code: string): boolean {
-  return (
-    P_A_C_K_E_R_RE.test(code) ||
-    EVAL_ATOB_RE.test(code) ||
-    EVAL_UNESCAPE_RE.test(code) ||
-    FUNCTION_CONSTRUCTOR_RE.test(code)
-  );
+  // Pattern 1: Dean Edwards packer — eval(function(p,a,c,k,e,d){...})
+  if (P_A_C_K_E_R_RE.test(code)) return true;
+
+  // Pattern 2: Obfuscator.io-style hex string arrays
+  // Look for declarations like `var _0x1234 = [...]` with at least a few entries
+  const HEX_ARRAY_RE = /\b_0x[0-9a-f]{2,6}\s*=\s*\[/i;
+  if (HEX_ARRAY_RE.test(code)) return true;
+
+  return false;
 }
