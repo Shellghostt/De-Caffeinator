@@ -315,8 +315,16 @@ export class PipelineContext {
     const outDir = this.config.output.dir;
     fs.mkdirSync(outDir, { recursive: true });
 
-    this.logger = new Logger(outDir);
-    this.state = new StateManager(outDir);
+    // Derive the target-specific subdirectory for logs & state.
+    // This keeps each target's state isolated so re-runs on the same
+    // target don't skip assets due to stale cross-run hashes, and logs
+    // don't accumulate across different targets/runs.
+    const targetHost = extractTargetHostnameFromConfig(this.config);
+    const targetDir = path.join(outDir, targetHost);
+    fs.mkdirSync(targetDir, { recursive: true });
+
+    this.logger = new Logger(targetDir);
+    this.state = new StateManager(targetDir);
     this.results = new ResultsStore();
   }
 
@@ -352,6 +360,25 @@ export class PipelineContext {
 // ----------------------------------------------------------
 // UTILITIES
 // ----------------------------------------------------------
+
+/**
+ * Derive the target hostname from config for use as the output subdirectory.
+ * Mirrors the sanitization in lib/paths.ts so directory names stay consistent.
+ */
+function extractTargetHostnameFromConfig(config: PipelineConfig): string {
+  const url = config.target_urls[0];
+  if (!url) return "_unknown";
+  try {
+    const u = new URL(url.startsWith("http") ? url : `https://${url}`);
+    return u.hostname
+      .toLowerCase()
+      .replace(/[^a-z0-9.\-]/g, "_")
+      .replace(/^\.+|\.+$/g, "")
+      .slice(0, 100) || "_unknown";
+  } catch {
+    return "_unknown";
+  }
+}
 
 function deepMerge<T extends object>(base: T, override: Partial<T>): T {
   const result = { ...base };

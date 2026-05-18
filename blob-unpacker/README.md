@@ -50,7 +50,7 @@ Blob Unpacker crawls a target website, downloads every JavaScript file it can fi
 
 ```bash
 # Clone the repo
-git clone https://github.com/addydude/De-Caffeinator.git
+git clone https://github.com/shellghostt/De-Caffeinator.git
 cd De-Caffeinator/blob-unpacker
 
 # Install dependencies
