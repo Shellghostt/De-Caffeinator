@@ -398,13 +398,11 @@ blob-unpacker/
 
 ## Known Limitations
 
-1. **Static Crawler** — The crawler does not execute JavaScript. Client-side routes loaded purely via SPA navigation (e.g., Next.js `<Link>`) won't be found through link following. The Next.js `buildManifest` integration partially compensates.
+1. **Headless Browser Overhead** — While the pipeline now supports executing JavaScript via Playwright (`--playwright`), doing so increases memory usage and execution time compared to the static crawler. It is disabled by default for speed.
 
-2. **No Headless Browser** — For sites that require JavaScript execution to render content (heavy SPAs), a Puppeteer/Playwright integration would improve coverage.
+2. **Secret Detection False Positives** — High-entropy strings (like CSS class hashes or content hashes) may occasionally be flagged as potential secrets, although the strict false-positive heuristics mitigate most of this. The entropy threshold (`--entropy`) can be tuned.
 
-3. **Secret Detection False Positives** — High-entropy strings (like CSS class hashes or content hashes) may occasionally be flagged as potential secrets, although the strict false-positive heuristics mitigate most of this. The entropy threshold (`--entropy`) can be tuned.
-
-4. **No Authentication** — The crawler does not support authenticated sessions. Pages behind login walls are not crawled.
+3. **No Authentication** — The crawler does not support authenticated sessions. Pages behind login walls are not crawled.
 
 ---
 
