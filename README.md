@@ -120,6 +120,10 @@ npx ts-node src/index.ts <url> [options]
 | `--delay <ms>` | | `300` | Politeness delay between requests |
 | `--deobf-depth <n>` | | `5` | Max recursive de-obfuscation passes |
 | `--entropy <n>` | | `4.5` | Min Shannon entropy for secret detection |
+| `--playwright` | | | Enable Playwright SPA_DOM crawling |
+| `--pw-browser` | | `chromium` | Playwright browser to use |
+| `--pw-timeout` | | `15000` | Playwright navigation timeout in ms |
+| `--wayback` | | | Enable Wayback Machine CDX API query |
 | `--no-chunks` | | | Disable dynamic chunk discovery |
 | `--no-files` | | | Don't write source/deobfuscated files |
 | `--user-agent <str>` | | | Custom User-Agent string |
@@ -189,8 +193,11 @@ Discovers and downloads every JavaScript file from the target site using a multi
 |-------|-------------|
 | **1 — Entry Page** | Fetches root HTML, extracts all `<script src>` tags and inline `<script>` blocks |
 | **1b — Next.js Manifest** | Detects `buildId`, fetches `/_next/static/<id>/_buildManifest.js`, discovers all page-specific chunks |
-| **2 — Link Following** | Parses `<a href>` tags for same-origin pages, fetches them, repeats Phase 1 |
-| **3 — Chunk Discovery** | Scans downloaded JS bundles for Webpack/Rollup chunk IDs and fetches them |
+| **1c — Sitemap Discovery** | Probes `/robots.txt` and `/sitemap.xml`, expands sub-sitemaps, seeds link follower queue |
+| **2 — Link Following** | Parses `<a href>` tags for same-origin pages (priority sorted), fetches them, repeats Phase 1 |
+| **3 — Chunk Discovery** | Scans downloaded JS bundles for dynamic imports, literal path strings, and chunk loaders |
+| **4 — Playwright SPA** | (If `--playwright`) Boots headless browser, intercepts network to catch lazy-loaded scripts |
+| **5 — Wayback Machine** | (If `--wayback`) Queries CDX API to find orphaned/historical JS files no longer linked |
 
 All assets are deduplicated by SHA-256 content hash before entering the processing queue.
 

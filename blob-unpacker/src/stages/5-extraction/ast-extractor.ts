@@ -10,7 +10,7 @@
 
 import * as acorn from "acorn";
 import * as walk from "acorn-walk";
-import { DiscoveredEndpoint, DiscoveredConfig, ConfidenceLevel } from "../../types/contracts";
+import { DiscoveredEndpoint, DiscoveredConfig } from "../../types/contracts";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS";
 
@@ -72,6 +72,7 @@ export function extractViaAst(
   try {
     walk.simple(ast, {
       // ── fetch(url), axios.get(url), etc. ─────────────────────
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       CallExpression(node: any) {
         const callee = node.callee;
         const args = node.arguments;
@@ -134,6 +135,7 @@ export function extractViaAst(
       },
 
       // ── Object properties with config-like keys ──────────────
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       Property(node: any) {
         const key = node.key;
         let keyName: string | null = null;
@@ -179,6 +181,7 @@ export function extractViaAst(
       },
 
       // ── Variable assignments with URL-like strings ───────────
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       VariableDeclarator(node: any) {
         if (!node.id || !node.init) return;
         const idName = node.id.name;
@@ -223,6 +226,7 @@ export function extractViaAst(
 // HELPERS
 // ----------------------------------------------------------
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function reconstructTemplate(tl: any): string {
   let result = "";
   const quasis = tl.quasis || [];

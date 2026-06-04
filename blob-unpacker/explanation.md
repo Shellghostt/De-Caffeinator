@@ -25,14 +25,17 @@ The actual analysis happens in a sequential 5-stage pipeline.
 
 ### STAGE 1: Ingestion & Discovery
 **Goal:** Find every piece of JavaScript associated with the target application.
-- **Crawler Adapter:** Connects to the entry point (URL) and fetches the initial HTML/JS.
-- **Link Follower:** Parses the HTML to find `<script>` tags and dynamically injected bundles.
-- **Chunk Discovery:** Analyzes the JavaScript code specifically looking for dynamic imports (`import()`) or Webpack/Vite chunk loaders, downloading secondary JavaScript files that are not immediately loaded by the browser.
+- **Sitemap Discovery:** Probes `/robots.txt` and `/sitemap.xml`, expands sub-sitemaps, and feeds all page URLs into the discovery queue to bypass HTML link depth limits.
+- **Crawler Adapter:** Connects to the entry point (URL) and fetches the initial HTML/JS. Employs HTML entity decoding and modern User-Agent spoofing to bypass basic bot protection.
+- **Link Follower:** Parses the HTML to find `<script>` tags and dynamically injected bundles. Crawls same-origin links using a priority scoring system (prioritizing high-value pages over repetitive product pages).
+- **Playwright Crawler (SPA_DOM):** Launches a real headless Chrome browser to fully render the page and execute JavaScript, intercepting dynamic network requests to capture lazy-loaded or conditionally injected scripts.
+- **Wayback Machine CDX:** Queries the Internet Archive's Capture Index to unearth orphaned or historically deployed JavaScript files (and their source maps) that are no longer linked in modern HTML.
+- **Chunk Discovery:** Analyzes the JavaScript code looking for dynamic imports (`import()`), Webpack/Vite chunk loaders, or literal chunk path strings, downloading secondary files that are not immediately loaded by the browser.
 
 ### STAGE 2: Source Map Detection
 **Goal:** Determine if the developer accidentally left Source Maps exposed, which are the holy grail of reverse engineering.
-- **Comment Scanner:** Looks for `//# sourceMappingURL=...` comments at the bottom of JS files.
-- **Path Inferrer:** Even if the comment is missing, it guesses common source map locations (e.g., `/js/app.js.map`, `/sourcemaps/app.js.map`).
+- **Comment Scanner:** Looks for `//# sourceMappingURL=...` comments at the bottom of JS files, with explicit safeguards for inline scripts.
+- **Path Inferrer:** Even if the comment is missing, it guesses common source map locations (e.g., `/js/app.js.map`, `/sourcemaps/app.js.map`). Features query-string stripping and robust HEAD/GET fallback probing with JSON content validation (checking for `sources` and `mappings`) to avoid false positives from SPA catch-all routes.
 - **Inline Data Extractor:** Detects and parses base64-encoded inline source maps directly embedded in the JS code.
 
 ### STAGE 3: Source Reconstruction

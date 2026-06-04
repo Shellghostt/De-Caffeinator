@@ -84,6 +84,24 @@ def main():
   --no-chunks            Disable chunk discovery
   --no-files             Don't write JS files to disk
   --user-agent <str>     Custom User-Agent
+
+{C.BOLD}{C.CYAN}BROWSER DISCOVERY (SPA_DOM):{C.RESET}
+  {C.GREEN}--playwright{C.RESET}            Launch headless browser to capture dynamically-loaded JS
+  {C.GREEN}--pw-browser{C.RESET} <engine>   chromium | firefox | webkit  (default: chromium)
+  {C.GREEN}--pw-timeout{C.RESET} <ms>       Browser page load timeout      (default: 30000)
+  {C.GREEN}--pw-pages{C.RESET} <n>          Max pages for Playwright        (default: 20)
+  {C.GREEN}--pw-visible{C.RESET}            Show browser window (non-headless, useful for debugging)
+
+  {C.DIM}First run: install browser binaries with:{C.RESET}
+  {C.DIM}   npx playwright install chromium{C.RESET}
+
+{C.BOLD}{C.CYAN}HISTORICAL DISCOVERY (Wayback):{C.RESET}
+  {C.GREEN}--wayback{C.RESET}               Query Wayback Machine CDX for historical JS URLs
+  {C.GREEN}--wb-results{C.RESET} <n>        Max CDX results per domain      (default: 200)
+  {C.GREEN}--wb-max-age{C.RESET} <days>     Only fetch snapshots N days old max (0 = any age)
+
+{C.BOLD}FULL COVERAGE EXAMPLE:{C.RESET}
+  python run.py https://example.com --deep --playwright --wayback
 """)
         sys.exit(0)
 

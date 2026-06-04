@@ -25,16 +25,24 @@ import { detectMap } from "./stages/2-map-detection";
 import { reconstruct } from "./stages/3-reconstruction";
 import { deobfuscate } from "./stages/4-deobfuscation";
 import { extract } from "./stages/5-extraction";
+import { EventEmitter } from "events";
 
 // ----------------------------------------------------------
 // PIPELINE RUNNER (exported for programmatic use)
 // ----------------------------------------------------------
 
+/**
+ * Run the blob-unpacker pipeline programmatically
+ * @param userConfig Partial pipeline configuration
+ * @param ingestionOpts Options for the ingestion stage
+ * @param emitter Optional EventEmitter for real-time event streaming (web API integration)
+ */
 export async function run(
   userConfig: Partial<PipelineConfig> = {},
-  ingestionOpts: IngestionOptions = {}
+  ingestionOpts: IngestionOptions = {},
+  emitter?: EventEmitter
 ): Promise<void> {
-  const ctx = new PipelineContext(userConfig);
+  const ctx = new PipelineContext(userConfig, emitter);
   const queue = new AssetQueue(ctx);
 
   ctx.logger.info("Blob Unpacker initialized", {
@@ -52,6 +60,13 @@ export async function run(
   await orchestrator.run();
 
   ctx.logger.info("Pipeline complete.");
+
+  // Emit completion event for web API integration
+  ctx.getEmitter().emit("complete", {
+    timestamp: new Date().toISOString(),
+    message: "Pipeline execution completed",
+  });
+
   ctx.teardown();
 }
 
@@ -94,7 +109,19 @@ program
   .option("-t, --timeout <ms>", "HTTP request timeout in ms", "20000")
   .option("-c, --concurrency <n>", "Max concurrent requests", "5")
   .option("--delay <ms>", "Delay between requests in ms", "300")
-  .option("--user-agent <str>", "Custom User-Agent string", "BlobUnpacker/1.0")
+  .option("--user-agent <str>", "Custom User-Agent string", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+  // ── Browser Options (Playwright SPA_DOM) ────────────────
+  .option("--playwright", "Enable Playwright headless browser scan (Phase 4 — SPA_DOM)")
+  .option("--pw-browser <browser>", "Playwright browser engine: chromium | firefox | webkit", "chromium")
+  .option("--pw-timeout <ms>", "Playwright page load timeout in ms", "30000")
+  .option("--pw-pages <n>", "Max pages to visit with Playwright", "20")
+  .option("--pw-visible", "Show browser window during Playwright scan (non-headless)")
+
+  // ── Wayback Machine Options ──────────────────────────────
+  .option("--wayback", "Enable Wayback Machine CDX historical JS discovery (Phase 5)")
+  .option("--wb-results <n>", "Max Wayback CDX results to fetch", "200")
+  .option("--wb-max-age <days>", "Only include snapshots newer than N days (0 = any age)", "0")
 
   // ── Analysis Options ────────────────────────────────────
   .option("--deobf-depth <n>", "Max de-obfuscation passes", "5")
@@ -106,6 +133,7 @@ program
   .option("--deep", "Deep recon: max depth, max pages, low entropy")
 
   // ── Action ──────────────────────────────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   .action(async (url: string, opts: Record<string, any>) => {
     printBanner();
 
@@ -167,6 +195,19 @@ program
         max_pages: parseInt(opts.pages, 10),
         discover_chunks: opts.chunks !== false,
       },
+      playwright: {
+        enabled: Boolean(opts.playwright),
+        browser: (opts.pwBrowser ?? "chromium") as "chromium" | "firefox" | "webkit",
+        timeout_ms: parseInt(opts.pwTimeout ?? "30000", 10),
+        wait_until: "networkidle",
+        headless: !opts.pwVisible,
+        max_pages: parseInt(opts.pwPages ?? "20", 10),
+      },
+      wayback: {
+        enabled: Boolean(opts.wayback),
+        max_results: parseInt(opts.wbResults ?? "200", 10),
+        max_age_days: parseInt(opts.wbMaxAge ?? "0", 10),
+      },
       deobfuscation: {
         max_depth: parseInt(opts.deobfDepth, 10),
         eval_sandbox: true,
@@ -189,6 +230,8 @@ program
     console.log(`  🔄 Deobf passes: ${config.deobfuscation!.max_depth}`);
     console.log(`  🔐 Min entropy:  ${config.extraction!.min_secret_entropy}`);
     console.log(`  📦 Chunks:       ${config.crawl!.discover_chunks ? "enabled" : "disabled"}`);
+    console.log(`  🎭 Playwright:   ${config.playwright!.enabled ? `enabled (${config.playwright!.browser})` : "disabled"}`);
+    console.log(`  📼 Wayback:      ${config.wayback!.enabled ? `enabled (max ${config.wayback!.max_results} results)` : "disabled"}`);
     console.log(`  💾 Write files:  ${config.output!.write_source_files ? "yes" : "no"}`);
     console.log();
 
@@ -216,7 +259,7 @@ async function runInteractiveMode() {
   console.log("Welcome to Blob Unpacker Interactive Mode!");
   console.log("You can also run this tool from the command line for more options.");
   console.log("Example: blob-unpacker.exe https://example.com --deep\n");
-  
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -258,7 +301,7 @@ async function runInteractiveMode() {
       timeout_ms: 20000,
       max_concurrent: 5,
       delay_between_ms: 300,
-      user_agent: "BlobUnpacker/1.0",
+      user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     },
     crawl: {
       max_depth: 3,

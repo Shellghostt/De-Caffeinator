@@ -18,8 +18,6 @@ const MULTI_LINE_RE = /\/\*[#@]\s*sourceMappingURL=([^\s*'"]+)\s*\*\//g;
 
 // Patterns that indicate we're inside a string literal (false positive)
 // e.g. "//# sourceMappingURL=" as a string value
-const STRING_CONTEXT_RE = /['"]\s*\/\/[#@]\s*sourceMappingURL=/;
-const TEMPLATE_CONTEXT_RE = /`[^`]*\/\/[#@]\s*sourceMappingURL=/;
 
 export interface CommentScanResult {
   found: boolean;
@@ -61,13 +59,22 @@ export function scanForMapComment(
   // Use the LAST candidate (most likely to be the real one)
   const raw = candidates[candidates.length - 1];
 
-  // ── Data URI: map is embedded inline ─────────────────────
+  // ── Data URI: map is embedded inline ───────────────────────
   if (raw.startsWith("data:")) {
     const decoded = decodeDataUri(raw);
     if (decoded) {
       return { found: true, url: raw, isDataUri: true, embeddedContent: decoded };
     }
     return { found: false }; // malformed data URI
+  }
+
+  // ── Inline script guard ───────────────────────────────────
+  // Inline scripts get a synthetic `inline://...` URL which is not a valid
+  // HTTP base for resolving relative paths. A relative sourceMappingURL in an
+  // inline script cannot be fetched, so discard it.
+  // Absolute URLs (starting with http/https) in inline scripts are still valid.
+  if (assetUrl.startsWith("inline://") && !raw.startsWith("http")) {
+    return { found: false };
   }
 
   // ── External URL: resolve relative to asset URL ───────────

@@ -124,8 +124,7 @@ function parseIndexMap(json: Record<string, unknown>): ParsedSourceMap {
       : sources;
 
     // Adjust source indices — offset by current total
-    const sourceOffset = allSources.length;
-    allSources.push(...resolvedSources.map(normalizePath));
+        allSources.push(...resolvedSources.map(normalizePath));
 
     if (Array.isArray(sectionMap["sourcesContent"])) {
       const content = sectionMap["sourcesContent"] as (string | null)[];

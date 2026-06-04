@@ -112,7 +112,7 @@ export function extractHostname(url: string): string {
 function sanitizeHostname(hostname: string): string {
   return hostname
     .toLowerCase()
-    .replace(/[^a-z0-9.\-]/g, "_") // keep dots and hyphens, replace rest
+    .replace(/[^a-z0-9.-]/g, "_") // keep dots and hyphens, replace rest
     .replace(/^\.+|\.+$/g, "")      // strip leading/trailing dots
     .slice(0, 100)                   // guard against extremely long hostnames
     || "_unknown";

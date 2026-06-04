@@ -9,7 +9,7 @@
 // what each mangled identifier originally was.
 // ============================================================
 
-import { MappingSegment, decodeMappings, groupBySource, extractNameReferences } from "./vlq-decoder";
+import { MappingSegment, decodeMappings } from "./vlq-decoder";
 import { ParsedSourceMap } from "./map-parser";
 
 export interface NameRecoveryResult {

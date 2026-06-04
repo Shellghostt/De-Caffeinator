@@ -15,18 +15,44 @@ import { PipelineContext } from "../../core/context";
 import { fetchUrl } from "../../lib/http";
 import { sha256 } from "../../lib/hasher";
 import { classifyAsset, isJavaScript } from "./classifier";
-import { followLinks, FollowedPage } from "./link-follower";
+import { followLinks } from "./link-follower";
 import {
   discoverChunks,
   extractPublicPath,
   resolveChunkRef,
 } from "./chunk-discoverer";
+import { playwrightCrawl } from "./playwright-crawler";
+import { waybackDiscover } from "./wayback-discoverer";
 
 // Matches <script src="..."> and <script type="module" src="...">
-const SCRIPT_SRC_RE = /<script[^>]+src=["']([^"']+\.js[^"']*)["']/gi;
+// Pattern 1: src with explicit .js extension (or .mjs)
+const SCRIPT_SRC_RE = /<script[^>]+src=["']([^"']+\.(?:js|mjs)[^"']*)["']/gi;
+
+// Pattern 2: src without extension — some bundlers (Vite, Parcel) emit
+// <script type="module" src="/assets/index-abc123"> with no .js extension.
+// Hellhound-Spider uses BeautifulSoup which handles this transparently;
+// we need an extra pattern to catch these.
+const SCRIPT_SRC_NO_EXT_RE = /<script[^>]+type=["']module["'][^>]+src=["']([^"']+)["']|<script[^>]+src=["']([^"']+)["'][^>]+type=["']module["']/gi;
 
 // Matches inline <script>...</script> blocks (no src)
 const INLINE_SCRIPT_RE = /<script(?![^>]*\bsrc\b)[^>]*>([\s\S]*?)<\/script>/gi;
+
+/**
+ * Decode the 5 core HTML entities that appear in attribute values.
+ * This is critical because raw HTML has `&amp;` where URLs need `&`.
+ * Hellhound-Spider uses BeautifulSoup which decodes entities automatically;
+ * our regex-based extractor must do it manually.
+ *
+ * Example: `?defer&amp;ver=1.21.0` → `?defer&ver=1.21.0`
+ */
+function unescapeHtml(s: string): string {
+  return s
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#039;/gi, "'");
+}
 
 /** Global load order counter for this crawl session */
 let loadOrderCounter = 0;
@@ -65,8 +91,22 @@ export async function crawlEntry(
     );
   }
 
+  // ── Phase 1c: Sitemap discovery (mirrors Hellhound's "Sitemap" source) ─
+  // Fetch /sitemap.xml (and any Sitemap: entries in /robots.txt),
+  // resolve sub-sitemaps, and extract all page URLs.
+  // This is how Hellhound found /latest-news/ — and therefore frontend.js.
+  const sitemapPages = await discoverSitemapPages(entryUrl, ctx);
+  if (sitemapPages.length > 0) {
+    ctx.logger.info(
+      `Sitemap: discovered ${sitemapPages.length} page URL(s) from sitemap`,
+      { stage: "stage-1" }
+    );
+  }
+
   // ── Phase 2: Follow same-origin links (multi-page crawl) ─
-  const followedPages = await followLinks(entryUrl, html.body, ctx);
+  // Seed the link follower with both the HTML-extracted links AND the sitemap pages.
+  // The link follower deduplicates, so overlap is harmless.
+  const followedPages = await followLinks(entryUrl, html.body, ctx, sitemapPages);
 
   for (const page of followedPages) {
     const pageRecords = await extractScriptsFromPage(page.html, page.url, seenUrls, ctx);
@@ -94,6 +134,51 @@ export async function crawlEntry(
   ctx.logger.info(`Crawler: produced ${allRecords.length} total asset record(s) from ${entryUrl}`, {
     stage: "stage-1",
   });
+
+  // ── Build knownUrls set for Playwright & Wayback (avoid re-fetching) ──
+  const knownUrls = new Set<string>(
+    allRecords.map((r) => normalizeForDedup(r.url))
+  );
+
+  // ── Phase 4: Playwright SPA_DOM scan ──────────────────────
+  // Visit each crawled page in a real browser and capture any JS
+  // that was dynamically injected during JavaScript execution.
+  // This is the primary reason blob-unpacker was missing frontend.js.
+  if (ctx.config.playwright?.enabled) {
+    const allPageUrls = [
+      entryUrl,
+      ...followedPages.map((p) => p.url),
+    ];
+    const pwRecords = await playwrightCrawl(allPageUrls, knownUrls, ctx);
+    for (const r of pwRecords) {
+      knownUrls.add(normalizeForDedup(r.url));
+      allRecords.push(r);
+    }
+    if (pwRecords.length > 0) {
+      ctx.logger.info(
+        `Playwright (SPA_DOM): added ${pwRecords.length} new asset(s) from browser interception`,
+        { stage: "stage-1" }
+      );
+    }
+  }
+
+  // ── Phase 5: Wayback Machine historical discovery ─────────
+  // Query the CDX API for all JS URLs ever archived for this domain.
+  // Fetches the live URL first; falls back to archived snapshot.
+  // Catches JS files deployed then removed/renamed between versions.
+  if (ctx.config.wayback?.enabled) {
+    const wbRecords = await waybackDiscover(entryUrl, knownUrls, ctx);
+    for (const r of wbRecords) {
+      knownUrls.add(normalizeForDedup(r.url));
+      allRecords.push(r);
+    }
+    if (wbRecords.length > 0) {
+      ctx.logger.info(
+        `Wayback: added ${wbRecords.length} new asset(s) from historical archive`,
+        { stage: "stage-1" }
+      );
+    }
+  }
 
   return allRecords;
 }
@@ -348,6 +433,109 @@ async function discoverNextJsChunks(
   return discovered;
 }
 
+// ----------------------------------------------------------
+// PHASE 1c: Sitemap Discovery
+// Mirrors Hellhound-Spider's "Sitemap" discovery source.
+// Probes /robots.txt and /sitemap.xml to build a full list of
+// same-origin page URLs — bypassing link-crawl depth limits.
+// ----------------------------------------------------------
+
+async function discoverSitemapPages(
+  entryUrl: string,
+  ctx: PipelineContext
+): Promise<string[]> {
+  let origin: string;
+  try {
+    origin = new URL(entryUrl).origin;
+  } catch {
+    return [];
+  }
+
+  const sitemapUrls: string[] = [];
+
+  // Step 1: Check /robots.txt for Sitemap: directives
+  try {
+    const robotsRes = await fetchUrl(`${origin}/robots.txt`, ctx);
+    if (robotsRes.status >= 200 && robotsRes.status < 300) {
+      const robotsSitemaps = [...robotsRes.body.matchAll(/^Sitemap:\s*(.+)$/gim)]
+        .map((m) => m[1].trim())
+        .filter((u) => u.startsWith("http"));
+      sitemapUrls.push(...robotsSitemaps);
+      if (robotsSitemaps.length > 0) {
+        ctx.logger.debug(
+          `Sitemap: found ${robotsSitemaps.length} Sitemap directive(s) in robots.txt`,
+          { stage: "stage-1" }
+        );
+      }
+    }
+  } catch { /* robots.txt is optional */ }
+
+  // Step 2: Always probe /sitemap.xml (WordPress standard location)
+  const defaultSitemap = `${origin}/sitemap.xml`;
+  if (!sitemapUrls.includes(defaultSitemap)) {
+    sitemapUrls.push(defaultSitemap);
+  }
+
+  // Step 3: Fetch and parse each sitemap (handles index → sub-sitemap expansion)
+  const pageUrls = new Set<string>();
+  const processedSitemaps = new Set<string>();
+
+  const parseSitemap = async (url: string) => {
+    if (processedSitemaps.has(url)) return;
+    processedSitemaps.add(url);
+
+    try {
+      const res = await fetchUrl(url, ctx);
+      if (res.status < 200 || res.status >= 300) return;
+
+      const body = res.body;
+
+      // Is this a sitemap index? (contains <sitemap> elements with <loc> pointing to XML)
+      if (body.includes("<sitemapindex") || body.includes("<sitemap>")) {
+        const subSitemapRe = /<sitemap>[\s\S]*?<loc>([^<]+)<\/loc>[\s\S]*?<\/sitemap>/gi;
+        let m: RegExpExecArray | null;
+        subSitemapRe.lastIndex = 0;
+        while ((m = subSitemapRe.exec(body)) !== null) {
+          await parseSitemap(m[1].trim());
+        }
+      }
+
+      // Extract <url><loc> entries (regular sitemap)
+      const locRe = /<url>[\s\S]*?<loc>([^<]+)<\/loc>[\s\S]*?<\/url>/gi;
+      let lm: RegExpExecArray | null;
+      locRe.lastIndex = 0;
+      while ((lm = locRe.exec(body)) !== null) {
+        const pageUrl = lm[1].trim();
+        try {
+          const u = new URL(pageUrl);
+          // Same-origin only; skip media/asset files
+          if (u.origin === origin && !/\.(xml|jpg|jpeg|png|gif|webp|pdf|zip)$/i.test(u.pathname)) {
+            pageUrls.add(pageUrl);
+          }
+        } catch { /* skip malformed */ }
+      }
+
+      ctx.logger.debug(`Sitemap: parsed ${url} — ${pageUrls.size} page(s) total so far`, {
+        stage: "stage-1",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.logger.debug(`Sitemap: failed to fetch ${url}: ${msg}`, { stage: "stage-1" });
+    }
+  };
+
+  for (const sitemapUrl of sitemapUrls) {
+    await parseSitemap(sitemapUrl);
+  }
+
+  const pages = [...pageUrls];
+  ctx.logger.info(`Sitemap: found ${pages.length} same-origin page(s) across all sitemaps`, {
+    stage: "stage-1",
+  });
+
+  return pages;
+}
+
 
 // ----------------------------------------------------------
 
@@ -403,19 +591,46 @@ function buildInlineRecord(content: string, originPage: string): AssetRecord {
 
 function extractScriptSrcs(html: string, base: string): string[] {
   const urls: string[] = [];
+  const seen = new Set<string>();
   let match: RegExpExecArray | null;
-  SCRIPT_SRC_RE.lastIndex = 0;
 
+  // Pattern 1: explicit .js / .mjs extension
+  SCRIPT_SRC_RE.lastIndex = 0;
   while ((match = SCRIPT_SRC_RE.exec(html)) !== null) {
     try {
-      const resolved = new URL(match[1], base).href;
-      urls.push(resolved);
+      // CRITICAL: decode HTML entities before URL resolution.
+      // Hellhound-Spider's BeautifulSoup handles this automatically.
+      // Without this, WordPress URLs like `?defer&amp;ver=1.21.0` become
+      // malformed fetch targets with literal `&amp;` in the query string.
+      const decoded = unescapeHtml(match[1]);
+      const resolved = new URL(decoded, base).href;
+      if (!seen.has(resolved)) {
+        seen.add(resolved);
+        urls.push(resolved);
+      }
     } catch {
       // Unparseable URL — skip
     }
   }
 
-  return [...new Set(urls)]; // deduplicate
+  // Pattern 2: type="module" without .js extension
+  SCRIPT_SRC_NO_EXT_RE.lastIndex = 0;
+  while ((match = SCRIPT_SRC_NO_EXT_RE.exec(html)) !== null) {
+    const raw = match[1] || match[2];
+    if (!raw) continue;
+    try {
+      const decoded = unescapeHtml(raw);
+      const resolved = new URL(decoded, base).href;
+      if (!seen.has(resolved)) {
+        seen.add(resolved);
+        urls.push(resolved);
+      }
+    } catch {
+      // Unparseable URL — skip
+    }
+  }
+
+  return urls;
 }
 
 function extractInlineScripts(html: string): string[] {

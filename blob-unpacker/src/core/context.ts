@@ -6,6 +6,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { EventEmitter } from "events";
 import {
   AssetState,
   AssetProcessingStatus,
@@ -66,6 +67,30 @@ export interface PipelineConfig {
     discover_chunks: boolean;
   };
 
+  playwright?: {
+    /** Enable Playwright headless browser scan (Phase 4) */
+    enabled: boolean;
+    /** Browser engine to use */
+    browser: "chromium" | "firefox" | "webkit";
+    /** Page load timeout in ms */
+    timeout_ms: number;
+    /** Navigation wait condition */
+    wait_until: "networkidle" | "domcontentloaded" | "load";
+    /** Run browser without visible UI */
+    headless: boolean;
+    /** Max pages to run through Playwright (subset of crawled pages) */
+    max_pages: number;
+  };
+
+  wayback?: {
+    /** Enable Wayback Machine CDX API discovery (Phase 5) */
+    enabled: boolean;
+    /** Max historical JS URLs to fetch per domain */
+    max_results: number;
+    /** Only fetch if the snapshot is within this many days old (0 = any age) */
+    max_age_days: number;
+  };
+
   output: {
     /** Root directory for all output */
     dir: string;
@@ -97,12 +122,25 @@ export const DEFAULT_CONFIG: PipelineConfig = {
     timeout_ms: 15000,
     max_concurrent: 5,
     delay_between_ms: 300,
-    user_agent: "BlobUnpacker/1.0",
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   },
   crawl: {
     max_depth: 2,
     max_pages: 50,
     discover_chunks: true,
+  },
+  playwright: {
+    enabled: false,
+    browser: "chromium",
+    timeout_ms: 30000,
+    wait_until: "networkidle",
+    headless: true,
+    max_pages: 20,
+  },
+  wayback: {
+    enabled: false,
+    max_results: 200,
+    max_age_days: 0,
   },
   output: {
     dir: "./output",
@@ -128,17 +166,21 @@ export interface LogEntry {
 
 export class Logger {
   private logFile: fs.WriteStream | null = null;
+  private emitter: EventEmitter;
 
-  constructor(outputDir: string) {
+  constructor(outputDir: string, emitter?: EventEmitter) {
     const logPath = path.join(outputDir, "pipeline.log.jsonl");
     fs.mkdirSync(outputDir, { recursive: true });
     this.logFile = fs.createWriteStream(logPath, { flags: "a" });
+    this.emitter = emitter || new EventEmitter();
   }
 
   private write(entry: LogEntry): void {
     const line = JSON.stringify(entry);
     // Always write to file
     this.logFile?.write(line + "\n");
+    // Emit event for real-time subscriptions (web API, etc.)
+    this.emitter.emit("log", entry);
     // Console: suppress debug in production
     if (entry.level !== "debug") {
       const prefix = `[${entry.level.toUpperCase()}]`;
@@ -169,6 +211,10 @@ export class Logger {
 
   close(): void {
     this.logFile?.end();
+  }
+
+  getEmitter(): EventEmitter {
+    return this.emitter;
   }
 }
 
@@ -305,11 +351,13 @@ export class PipelineContext {
   readonly state: StateManager;
   readonly results: ResultsStore;
   readonly startedAt: string;
+  private emitter: EventEmitter;
 
-  constructor(userConfig: Partial<PipelineConfig> = {}) {
+  constructor(userConfig: Partial<PipelineConfig> = {}, emitter?: EventEmitter) {
     // Deep merge user config over defaults
     this.config = Object.freeze(deepMerge(DEFAULT_CONFIG, userConfig));
     this.startedAt = new Date().toISOString();
+    this.emitter = emitter || new EventEmitter();
 
     // Ensure root output directory exists
     const outDir = this.config.output.dir;
@@ -323,9 +371,13 @@ export class PipelineContext {
     const targetDir = path.join(outDir, targetHost);
     fs.mkdirSync(targetDir, { recursive: true });
 
-    this.logger = new Logger(targetDir);
+    this.logger = new Logger(targetDir, this.emitter);
     this.state = new StateManager(targetDir);
     this.results = new ResultsStore();
+  }
+
+  getEmitter(): EventEmitter {
+    return this.emitter;
   }
 
   buildRunReport(totalAssets: number): RunReport {
@@ -372,7 +424,7 @@ function extractTargetHostnameFromConfig(config: PipelineConfig): string {
     const u = new URL(url.startsWith("http") ? url : `https://${url}`);
     return u.hostname
       .toLowerCase()
-      .replace(/[^a-z0-9.\-]/g, "_")
+      .replace(/[^a-z0-9.-]/g, "_")
       .replace(/^\.+|\.+$/g, "")
       .slice(0, 100) || "_unknown";
   } catch {

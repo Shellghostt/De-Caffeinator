@@ -12,7 +12,7 @@
 
 import { ReconstructedFile } from "../../types/contracts";
 import { ParsedSourceMap } from "./map-parser";
-import { recoverNames, buildLineMappings } from "./name-recovery";
+import { recoverNames } from "./name-recovery";
 import { decodeMappings, groupBySource } from "./vlq-decoder";
 
 export interface PartialReconstructResult {
@@ -76,7 +76,7 @@ export function partialReconstruct(
   }
 
   // ── Phase 4: Apply name recovery to the minified JS ──────
-  const { annotatedJs, recoveredCount, nameMap } = recoverNames(rawMinifiedJs, map);
+  const { annotatedJs, recoveredCount } = recoverNames(rawMinifiedJs, map);
 
   // Build the unmapped chunk with name recovery applied
   const unmappedChunks = [annotatedJs];
@@ -256,6 +256,7 @@ function buildStructureManifest(
   const recoveredPaths = new Set(recoveredFiles.map((f) => f.path));
 
   // Build a nested tree structure
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tree: any = {};
   for (const p of knownPaths) {
     const parts = p.split(/[/\\]/);

@@ -103,7 +103,7 @@ export function extractComments(
       sourceType: "module",
       allowHashBang: true,
       locations: true,
-      onComment: comments as any,
+      onComment: comments as unknown as NonNullable<acorn.Options["onComment"]>,
     });
   } catch {
     // Module mode failed — try script mode
@@ -114,7 +114,7 @@ export function extractComments(
         sourceType: "script",
         allowHashBang: true,
         locations: true,
-        onComment: comments as any,
+        onComment: comments as unknown as NonNullable<acorn.Options["onComment"]>,
       });
     } catch {
       // Parse failed entirely — return empty rather than falling back to regex

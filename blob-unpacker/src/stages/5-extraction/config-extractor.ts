@@ -94,8 +94,7 @@ export function extractConfigs(
 ): DiscoveredConfig[] {
   const seen = new Set<string>();
   const results: DiscoveredConfig[] = [];
-  const lines = code.split("\n");
-
+  
   const add = (key: string, value: string, line?: number) => {
     const dedupKey = `${key}::${value}`;
     if (seen.has(dedupKey)) return;

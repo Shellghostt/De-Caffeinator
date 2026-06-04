@@ -37,7 +37,7 @@ const PATTERNS: SecretPattern[] = [
   // ── Generic API keys ──────────────────────────────────────
   {
     type: "api_key",
-    re: /(?:api[_-]?key|apikey|access[_-]?key|api[_-]?secret|app[_-]?key|app[_-]?secret)\s*[:=]\s*["'`]([A-Za-z0-9_\-]{16,128})["'`]/gi,
+    re: /(?:api[_-]?key|apikey|access[_-]?key|api[_-]?secret|app[_-]?key|app[_-]?secret)\s*[:=]\s*["'`]([A-Za-z0-9_-]{16,128})["'`]/gi,
     group: 1,
   },
 
@@ -156,7 +156,7 @@ const PATTERNS: SecretPattern[] = [
   // ── OAuth client secrets ───────────────────────────────────
   {
     type: "hardcoded_credential",
-    re: /(?:client[_-]?secret|consumer[_-]?secret)\s*[:=]\s*["'`]([A-Za-z0-9_\-]{16,128})["'`]/gi,
+    re: /(?:client[_-]?secret|consumer[_-]?secret)\s*[:=]\s*["'`]([A-Za-z0-9_-]{16,128})["'`]/gi,
     group: 1,
   },
 ];
@@ -197,7 +197,7 @@ const KNOWN_ALPHABETS = [
 const KNOWN_ALPHABET_SET = new Set(KNOWN_ALPHABETS);
 
 // Also catch Base64 alphabets that are reordered or slightly varied
-const BASE64_ALPHABET_RE = /^[A-Za-z0-9+\/=\-_]{64,66}$/;
+const BASE64_ALPHABET_RE = /^[A-Za-z0-9+/=_-]{64,66}$/;
 function isEncodingAlphabet(value: string): boolean {
   if (KNOWN_ALPHABET_SET.has(value)) return true;
   // A string that is 64-66 chars and contains ALL of A-Z, a-z, 0-9
@@ -375,7 +375,7 @@ export function extractSecrets(
   // ── Pass 3: High-entropy standalone string scan ────────────
   // Catch secrets that don't match specific patterns but have
   // suspiciously high entropy (random-looking strings)
-  const HIGH_ENTROPY_RE = /["'`]([A-Za-z0-9+/=_\-]{32,128})["'`]/g;
+  const HIGH_ENTROPY_RE = /["'`]([A-Za-z0-9+/=_-]{32,128})["'`]/g;
   HIGH_ENTROPY_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = HIGH_ENTROPY_RE.exec(code)) !== null) {

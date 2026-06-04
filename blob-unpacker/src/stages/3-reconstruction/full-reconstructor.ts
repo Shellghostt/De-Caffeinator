@@ -111,6 +111,7 @@ function isInternalEntry(p: string): boolean {
  */
 function buildManifest(files: ReconstructedFile[], map: ParsedSourceMap): string {
   // Build a nested tree structure
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tree: any = {};
   for (const f of files) {
     if (f.path.startsWith("_")) continue; // skip meta files

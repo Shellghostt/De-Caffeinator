@@ -14,7 +14,7 @@ export interface DiscoveredChunk {
   /** The raw reference found (may be partial path or full URL) */
   raw: string;
   /** The source pattern that discovered it */
-  source: "dynamic_import" | "webpack_require" | "webpack_jsonp" | "react_lazy" | "chunk_url_pattern" | "vite_glob";
+  source: "dynamic_import" | "webpack_require" | "webpack_jsonp" | "react_lazy" | "chunk_url_pattern" | "vite_glob" | "js_literal";
 }
 
 // ── Dynamic import() ────────────────────────────────────────
@@ -32,7 +32,6 @@ const WEBPACK_REQUIRE_E_RE = /__webpack_require__\.e\s*\(\s*(?:\/\*[^*]*\*\/\s*)
 
 // ── Webpack chunk loading: __webpack_require__.f.j ──────────
 // Used in Webpack 5 for JSONP chunk loading
-const WEBPACK_F_J_RE = /__webpack_require__\.f\.j\s*=\s*function\s*\(([^)]*)\)/g;
 
 // ── Webpack chunk URL construction ──────────────────────────
 // __webpack_require__.p + __webpack_require__.u(chunkId)
@@ -58,6 +57,19 @@ const VITE_GLOB_RE = /import\.meta\.glob\s*\(\s*["'`]([^"'`]+)["'`]/g;
 // ── Generic publicPath + chunk patterns ─────────────────────
 // e.g. "https://cdn.example.com/js/" used as prefix
 const PUBLIC_PATH_RE = /(?:__webpack_require__\.p|__webpack_public_path__|publicPath)\s*=\s*["']([^"']+)["']/g;
+
+// ── Broad absolute JS path literal (Hellhound-Spider line 4399) ─
+// Scans for ANY string literal containing an absolute path ending in .js.
+// This is the catch-all that discovers JS files referenced anywhere in the code
+// as string constants — even in plugin loader registrations, asset manifests
+// embedded in JS, or WordPress plugin enqueue lists.
+//
+// Example found in academybugs.com:
+//   'svp-frontend' => '/wp-content/plugins/super-video-player/dist/frontend.js'
+// (WordPress plugin registration arrays frequently embed the full JS path)
+//
+// Pattern mirrors Hellhound's: re.finditer(r'["\'](/[a-zA-Z0-9._\-/]+\.js)["\']', text)
+const BROAD_JS_PATH_RE = /["'](\/[a-zA-Z0-9._\-/]+\.(?:js|mjs))["']/g;
 
 /**
  * Scan JS source code for references to dynamically loaded chunks.
@@ -119,6 +131,15 @@ export function discoverChunks(jsContent: string): DiscoveredChunk[] {
     for (const id of ids) {
       add(id, "webpack_jsonp");
     }
+  }
+
+  // Broad absolute /path/to/file.js string literals.
+  // This is the Hellhound-Spider line-4399 catch-all:
+  //   for m in re.finditer(r'["\'](/[a-zA-Z0-9._\-/]+\.js)["\'']', text): ...
+  // Catches plugin enqueue arrays, asset manifests, and any JS that lists
+  // its sibling script paths as string constants.
+  for (const m of matchAll(jsContent, BROAD_JS_PATH_RE)) {
+    add(m[1], "js_literal");
   }
 
   return found;
