@@ -24,6 +24,8 @@
 
 import { DiscoveredSecret, SecretType } from "../../types/contracts";
 import { shannonEntropy } from "./entropy";
+import * as acorn from "acorn";
+import * as walk from "acorn-walk";
 
 interface SecretPattern {
   type: SecretType;
@@ -306,6 +308,55 @@ export function extractSecrets(
   const results: DiscoveredSecret[] = [];
   const lines = code.split("\n");
 
+  // ── AST Pre-pass: Find ignored literal ranges ──────────────
+  const ignoredRanges: Array<{start: number; end: number}> = [];
+  try {
+    let ast: acorn.Node;
+    try {
+      ast = acorn.parse(code, { ecmaVersion: 2022, sourceType: "module", allowHashBang: true, locations: false });
+    } catch {
+      ast = acorn.parse(code, { ecmaVersion: 2022, sourceType: "script", allowHashBang: true, locations: false });
+    }
+    
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    walk.simple(ast, {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      Property(node: any) {
+        if (node.key && node.key.type === "Literal") {
+          ignoredRanges.push({ start: node.key.start, end: node.key.end });
+        }
+        const keyName = node.key.name || node.key.value;
+        if (
+          keyName && 
+          /^(?:className|class|id|data-testid|data-v-[a-z0-9]+)$/i.test(keyName) &&
+          node.value && node.value.type === "Literal"
+        ) {
+          ignoredRanges.push({ start: node.value.start, end: node.value.end });
+        }
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      CallExpression(node: any) {
+        const callee = node.callee;
+        if (
+          callee && callee.type === "Identifier" && 
+          /^(?:require|__webpack_require__|import)$/.test(callee.name)
+        ) {
+          for (const arg of node.arguments) {
+            if (arg.type === "Literal") {
+              ignoredRanges.push({ start: arg.start, end: arg.end });
+            }
+          }
+        }
+      }
+    });
+  } catch {
+    // AST failed, silently fall back to regex only
+  }
+
+  const isIgnored = (index: number) => {
+    return ignoredRanges.some((r) => index >= r.start && index <= r.end);
+  };
+
   // ── Pass 1: Known-prefix scan (highest confidence) ─────────
   // Scan the entire code for strings matching known service prefixes.
   // These bypass entropy checks entirely — the prefix IS the signal.
@@ -318,6 +369,8 @@ export function extractSecrets(
 
     const kp = matchKnownPrefix(value);
     if (!kp) continue;
+
+    if (isIgnored(prefixMatch.index)) continue;
 
     const line = getLineNumber(code, prefixMatch.index);
     const context = getContext(lines, line);
@@ -349,6 +402,8 @@ export function extractSecrets(
       if (FAKE_VALUES.has(value) || FAKE_VALUES.has(value.toLowerCase())) continue;
       if (VARIABLE_REF_RE.test(value)) continue;
       if (seen.has(value)) continue;
+
+      if (isIgnored(match.index)) continue;
 
       const entropy = shannonEntropy(value);
       const effectiveMinEntropy = pattern.minEntropy ?? minEntropy;
@@ -383,6 +438,8 @@ export function extractSecrets(
     if (seen.has(value)) continue;
     if (FAKE_VALUES.has(value)) continue;
     if (value.length < 32) continue;
+
+    if (isIgnored(match.index)) continue;
 
     const entropy = shannonEntropy(value);
     if (entropy < 4.5) continue; // Very high threshold for generic strings
