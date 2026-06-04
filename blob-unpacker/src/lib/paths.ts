@@ -59,7 +59,16 @@ export function getAssetDir(
   const assetHost = extractHostname(assetUrl);
   const targetHost = extractTargetHostname(targetUrls);
 
-  if (assetHost === targetHost || assetHost === "_unknown") {
+  const cleanAsset = assetHost.replace(/^www\./, "");
+  const cleanTarget = targetHost.replace(/^www\./, "");
+
+  const isFirstParty = 
+    assetHost === "_unknown" ||
+    cleanAsset === cleanTarget ||
+    cleanAsset.endsWith("." + cleanTarget) ||
+    cleanTarget.endsWith("." + cleanAsset);
+
+  if (isFirstParty) {
     // First-party: write directly under the target folder
     return path.join(baseOutDir, targetHost);
   }
