@@ -6,3 +6,5 @@ build/
 .env.*
 *.log
 .DS_Store
+*.exe
+blobunpacker.pdf
