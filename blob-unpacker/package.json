@@ -8,11 +8,23 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:exe": "npm run build && node scripts/prepare-exe.js && pkg package.json --targets node18-win-x64 --output blob-unpacker.exe",
     "start": "ts-node src/index.ts",
     "dev": "ts-node src/index.ts",
     "scan": "ts-node src/index.ts",
     "lint": "eslint src/**/*.ts",
     "test": "ts-node --transpile-only src/tests/security-helpers.test.ts"
+  },
+  "pkg": {
+    "scripts": [
+      "dist/**/*.js"
+    ],
+    "assets": [
+      "node_modules/webcrack/**/*",
+      "node_modules/@babel/**/*",
+      "node_modules/isolated-vm/**/*"
+    ],
+    "outputPath": "."
   },
   "dependencies": {
     "acorn": "^8.16.0",
@@ -30,6 +42,7 @@
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
     "eslint": "^8.57.0",
+    "pkg": "^5.8.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.0"
   },
