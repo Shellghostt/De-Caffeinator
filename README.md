@@ -168,8 +168,7 @@ flowchart TB
     INF["Path inference"]
   end
 
-  subgraph Branch{"map_content?"}
-  end
+  Branch{"map_content?"}
 
   subgraph Stage3["Stage 3 — Reconstruction"]
     FULL["Full sourcesContent"]
