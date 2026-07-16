@@ -24,6 +24,7 @@
 
 import { DiscoveredSecret, SecretType } from "../../types/contracts";
 import { shannonEntropy } from "./entropy";
+import { buildLineStarts, lineNumberAt } from "../../lib/line-index";
 import * as acorn from "acorn";
 import * as walk from "acorn-walk";
 
@@ -140,10 +141,10 @@ const PATTERNS: SecretPattern[] = [
     group: 1,
   },
 
-  // ── Private key headers ────────────────────────────────────
+  // ── Private key PEM blocks (BEGIN through END) ─────────────
   {
     type: "private_key",
-    re: /(-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----)/g,
+    re: /(-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----)/g,
     group: 1,
     minEntropy: 0, // always flag
   },
@@ -229,7 +230,17 @@ const ENCODING_CONTEXT_NAMES = [
   "urlSafe", "urlSafeBase64", "intToChar", "charToInt",
 ];
 function isEncodingContext(contextSnippet: string): boolean {
-  return ENCODING_CONTEXT_NAMES.some((name) => contextSnippet.includes(name));
+  // Match encoding-related identifiers as whole tokens / assignment LHS,
+  // not arbitrary substrings (which caused false negatives near charset tables).
+  return ENCODING_CONTEXT_NAMES.some((name) => {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(
+      `(?:(?:var|let|const)\\s+)?(?:this\\.)?${escaped}\\s*[=:]|` +
+        `["'\`]${escaped}["'\`]\\s*:`,
+      "i"
+    );
+    return re.test(contextSnippet);
+  });
 }
 
 // ============================================================
@@ -258,21 +269,39 @@ const KNOWN_PREFIXES: KnownPrefix[] = [
   { prefix: "AIza",         service: "Google/Firebase",   type: "api_key" },
   { prefix: "pk.eyJ",       service: "Mapbox",            type: "api_key" },
   { prefix: "sk.eyJ",       service: "Mapbox (secret)",   type: "api_key" },
-  { prefix: "eyJ",          service: "JWT",               type: "jwt_secret" },
   { prefix: "shpat_",       service: "Shopify",           type: "api_key" },
   { prefix: "shpss_",       service: "Shopify Shared",    type: "api_key" },
-  { prefix: "AC",           service: "Twilio",            type: "api_key" },
   { prefix: "npm_",         service: "npm",               type: "api_key" },
   { prefix: "pypi-",        service: "PyPI",              type: "api_key" },
   { prefix: "sq0csp-",      service: "Square",            type: "api_key" },
   { prefix: "sqOatp-",      service: "Square OAuth",      type: "api_key" },
   { prefix: "hf_",          service: "Hugging Face",      type: "api_key" },
+  { prefix: "sk-",          service: "OpenAI",            type: "api_key" },
 ];
 
 function matchKnownPrefix(value: string): KnownPrefix | null {
   for (const kp of KNOWN_PREFIXES) {
-    if (value.startsWith(kp.prefix)) return kp;
+    if (!value.startsWith(kp.prefix)) continue;
+
+    // Format guards for short/ambiguous prefixes
+    if (kp.prefix === "AKIA" && !/^AKIA[0-9A-Z]{16}$/.test(value)) continue;
+    if (kp.prefix === "AIza" && value.length < 30) continue;
+    if (kp.prefix === "xox" && !/^xox[baprs]-/.test(value)) continue;
+    if (kp.prefix === "sk-" && value.length < 20) continue;
+
+    return kp;
   }
+
+  // Twilio Account SID: AC + 32 hex
+  if (/^AC[0-9a-fA-F]{32}$/.test(value)) {
+    return { prefix: "AC", service: "Twilio", type: "api_key" };
+  }
+
+  // JWT: three base64url segments
+  if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)) {
+    return { prefix: "eyJ", service: "JWT", type: "jwt_secret" };
+  }
+
   return null;
 }
 
@@ -302,11 +331,13 @@ function isFalsePositive(value: string, contextSnippet: string): boolean {
 export function extractSecrets(
   code: string,
   sourceFile: string,
-  minEntropy: number
+  minEntropy: number,
+  extraPatterns: string[] = []
 ): DiscoveredSecret[] {
   const seen = new Set<string>();
   const results: DiscoveredSecret[] = [];
   const lines = code.split("\n");
+  const lineStarts = buildLineStarts(code);
 
   // ── AST Pre-pass: Find ignored literal ranges ──────────────
   const ignoredRanges: Array<{start: number; end: number}> = [];
@@ -372,7 +403,7 @@ export function extractSecrets(
 
     if (isIgnored(prefixMatch.index)) continue;
 
-    const line = getLineNumber(code, prefixMatch.index);
+    const line = lineNumberAt(lineStarts, prefixMatch.index);
     const context = getContext(lines, line);
 
     // Even known-prefix matches can be false positives in context
@@ -409,7 +440,7 @@ export function extractSecrets(
       const effectiveMinEntropy = pattern.minEntropy ?? minEntropy;
       if (entropy < effectiveMinEntropy) continue;
 
-      const line = getLineNumber(code, match.index);
+      const line = lineNumberAt(lineStarts, match.index);
       const context = getContext(lines, line);
 
       // ── Apply false-positive filters ──────────────────────
@@ -445,7 +476,7 @@ export function extractSecrets(
     if (entropy < 4.5) continue; // Very high threshold for generic strings
 
     // Check context for secret-like assignments
-    const line = getLineNumber(code, match.index);
+    const line = lineNumberAt(lineStarts, match.index);
     const context = getContext(lines, line);
     if (!/(?:key|secret|token|password|credential|auth|api)/i.test(context)) continue;
 
@@ -463,6 +494,34 @@ export function extractSecrets(
     });
   }
 
+  // ── Pass 4: Custom operator patterns from config ─────────
+  for (const raw of extraPatterns) {
+    try {
+      const re = new RegExp(raw, "g");
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(code)) !== null) {
+        const value = m[1] ?? m[0];
+        if (!value || seen.has(value) || value.length < 8) continue;
+        if (isIgnored(m.index)) continue;
+        const line = lineNumberAt(lineStarts, m.index);
+        const context = getContext(lines, line);
+        if (isFalsePositive(value, context)) continue;
+        seen.add(value);
+        results.push({
+          type: "unknown_high_entropy",
+          value: maskSecret(value),
+          entropy: parseFloat(shannonEntropy(value).toFixed(3)),
+          context_snippet: context,
+          source_file: sourceFile,
+          line,
+        });
+      }
+    } catch {
+      // invalid user regex
+    }
+  }
+
   return results;
 }
 
@@ -471,16 +530,12 @@ export function extractSecrets(
 // ----------------------------------------------------------
 
 /**
- * Mask a secret for safe output — show first 4 and last 4 chars.
- * This prevents the pipeline's own output from being a security risk.
+ * Mask a secret for safe output — show first 4 and last 4 chars for long values.
+ * Short secrets are fully redacted (length only) to avoid recoverable leaks.
  */
 function maskSecret(value: string): string {
-  if (value.length <= 12) return value.slice(0, 3) + "***" + value.slice(-3);
+  if (value.length <= 12) return `*** [${value.length} chars]`;
   return value.slice(0, 4) + "..." + value.slice(-4) + ` [${value.length} chars]`;
-}
-
-function getLineNumber(code: string, index: number): number {
-  return code.slice(0, index).split("\n").length;
 }
 
 function getContext(lines: string[], lineNum: number): string {

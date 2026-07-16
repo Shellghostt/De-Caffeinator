@@ -59,7 +59,7 @@ const RULES: CommentRule[] = [
   // ── TODO items ──────────────────────────────────────────────
   {
     category: "todo",
-    re: /\bTODO\b|\bTO[\s-]?DO\b|\bNEED.{0,5}TO\b|\bSHOULD\b|\bPLEASE\b|\bREFACTOR\b|\bCLEANUP\b|\bOPTIMIZE\b/i,
+    re: /\bTODO\b|\bTO[\s-]?DO\b|\bFIXME\b|\bREFACTOR\b|\bCLEAN[\s-]?UP\b|\bOPTIMIZE\b/i,
     priority: 5,
   },
 

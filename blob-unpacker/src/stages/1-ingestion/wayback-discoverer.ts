@@ -34,7 +34,8 @@ import { classifyAsset, isJavaScript } from "./classifier";
 
 const CDX_API_BASE = "https://web.archive.org/cdx/search/cdx";
 
-let loadOrderOffset = 20000; // Start high so Wayback assets sort after Playwright ones
+/** Per-invocation counter (reset each waybackDiscover call) */
+let loadOrderOffset = 20000;
 
 /**
  * Query the Wayback Machine for historical JS URLs for the target domain,
@@ -51,6 +52,8 @@ export async function waybackDiscover(
 ): Promise<AssetRecord[]> {
   const cfg = ctx.config.wayback;
   if (!cfg?.enabled) return [];
+
+  loadOrderOffset = 20000;
 
   let hostname: string;
   try {
@@ -163,12 +166,23 @@ export async function waybackDiscover(
 async function tryFetchLive(
   url: string,
   hostname: string,
-  knownUrls: Set<string>,
+  _knownUrls: Set<string>,
   ctx: PipelineContext
 ): Promise<AssetRecord | null> {
   try {
     const res = await fetchUrl(url, ctx);
     if (res.status < 200 || res.status >= 300) return null;
+
+    // Enforce final host matches target (redirects can escape)
+    try {
+      const finalHost = new URL(res.url).hostname;
+      if (finalHost !== hostname && !finalHost.endsWith(`.${hostname}`)) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+
     const ct = res.headers["content-type"] ?? "";
     if (!isJavaScript(res.body, ct)) return null;
 
@@ -227,10 +241,21 @@ async function tryFetchArchived(
  * Wayback sometimes prepends a comment block or appends analytics.
  */
 function stripWaybackInjection(code: string): string {
-  // Remove the Wayback injection block at the top
-  // Format: /* FILE ARCHIVED ON ... BY THE WAYBACK MACHINE ... */
-  const stripped = code.replace(
+  let stripped = code.replace(
     /^\/\*\s*FILE ARCHIVED ON[\s\S]*?WAYBACK MACHINE[\s\S]*?\*\/\s*/i,
+    ""
+  );
+  // Additional common Wayback wrappers
+  stripped = stripped.replace(
+    /^\/\*<!\[[\s\S]*?\]>\*\/\s*/i,
+    ""
+  );
+  stripped = stripped.replace(
+    /\/\*\s*playback timings[\s\S]*?\*\//gi,
+    ""
+  );
+  stripped = stripped.replace(
+    /<!--\s*End Wayback[\s\S]*?-->/gi,
     ""
   );
   return stripped;

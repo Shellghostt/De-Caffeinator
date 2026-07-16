@@ -91,27 +91,33 @@ export function scanForMapComment(
  * Counts unescaped quotes before the position — odd count means we're inside a string.
  */
 function isInsideString(source: string, matchIndex: number): boolean {
-  // Look at the line containing this match
+  // Prefer EOF-adjacent matches: scan only from last non-string region.
+  // Heuristic: walk character-by-character tracking string state for the
+  // line containing the match (handles escaped quotes better than parity counts).
   const lineStart = source.lastIndexOf("\n", matchIndex) + 1;
   const beforeMatch = source.slice(lineStart, matchIndex);
 
-  // Count unescaped single quotes, double quotes, and backticks
-  const singleQuotes = countUnescaped(beforeMatch, "'");
-  const doubleQuotes = countUnescaped(beforeMatch, '"');
-  const backticks = countUnescaped(beforeMatch, "`");
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
+  let escaped = false;
 
-  // If any quote count is odd, we're likely inside a string
-  return (singleQuotes % 2 !== 0) || (doubleQuotes % 2 !== 0) || (backticks % 2 !== 0);
-}
-
-function countUnescaped(text: string, char: string): number {
-  let count = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === char && (i === 0 || text[i - 1] !== "\\")) {
-      count++;
+  for (let i = 0; i < beforeMatch.length; i++) {
+    const ch = beforeMatch[i];
+    if (escaped) {
+      escaped = false;
+      continue;
     }
+    if (ch === "\\" && (inSingle || inDouble || inTemplate)) {
+      escaped = true;
+      continue;
+    }
+    if (!inDouble && !inTemplate && ch === "'") inSingle = !inSingle;
+    else if (!inSingle && !inTemplate && ch === '"') inDouble = !inDouble;
+    else if (!inSingle && !inDouble && ch === "`") inTemplate = !inTemplate;
   }
-  return count;
+
+  return inSingle || inDouble || inTemplate;
 }
 
 function decodeDataUri(uri: string): string | null {

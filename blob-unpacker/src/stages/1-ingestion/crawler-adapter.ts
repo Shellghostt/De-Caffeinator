@@ -12,7 +12,7 @@
 
 import { AssetRecord } from "../../types/contracts";
 import { PipelineContext } from "../../core/context";
-import { fetchUrl } from "../../lib/http";
+import { fetchUrl, sameOrigin } from "../../lib/http";
 import { sha256 } from "../../lib/hasher";
 import { classifyAsset, isJavaScript } from "./classifier";
 import { followLinks } from "./link-follower";
@@ -23,6 +23,7 @@ import {
 } from "./chunk-discoverer";
 import { playwrightCrawl } from "./playwright-crawler";
 import { waybackDiscover } from "./wayback-discoverer";
+import { decodeHtmlEntities } from "../../lib/html-entities";
 
 // Matches <script src="..."> and <script type="module" src="...">
 // Pattern 1: src with explicit .js extension (or .mjs)
@@ -37,24 +38,16 @@ const SCRIPT_SRC_NO_EXT_RE = /<script[^>]+type=["']module["'][^>]+src=["']([^"']
 // Matches inline <script>...</script> blocks (no src)
 const INLINE_SCRIPT_RE = /<script(?![^>]*\bsrc\b)[^>]*>([\s\S]*?)<\/script>/gi;
 
+const MAX_CHUNK_FETCHES = 200;
+
 /**
- * Decode the 5 core HTML entities that appear in attribute values.
- * This is critical because raw HTML has `&amp;` where URLs need `&`.
- * Hellhound-Spider uses BeautifulSoup which decodes entities automatically;
- * our regex-based extractor must do it manually.
- *
- * Example: `?defer&amp;ver=1.21.0` → `?defer&ver=1.21.0`
+ * Decode HTML entities in attribute values (URLs often contain &amp;).
  */
 function unescapeHtml(s: string): string {
-  return s
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#039;/gi, "'");
+  return decodeHtmlEntities(s);
 }
 
-/** Global load order counter for this crawl session */
+/** Per-crawl load order — reset at start of crawlEntry */
 let loadOrderCounter = 0;
 
 export async function crawlEntry(
@@ -204,11 +197,13 @@ async function extractScriptsFromPage(
 
   for (const url of externalUrls) {
     if (seenUrls.has(normalizeForDedup(url))) continue;
-    seenUrls.add(normalizeForDedup(url));
 
     try {
       const record = await fetchAsset(url, pageUrl, false, ctx);
-      if (record) records.push(record);
+      if (record) {
+        seenUrls.add(normalizeForDedup(url));
+        records.push(record);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       ctx.logger.warn(`Crawler: failed to fetch ${url}: ${msg}`, { stage: "stage-1" });
@@ -245,8 +240,10 @@ async function discoverChunksFromAssets(
   ctx: PipelineContext
 ): Promise<AssetRecord[]> {
   const discovered: AssetRecord[] = [];
+  let fetchAttempts = 0;
 
   for (const record of existingRecords) {
+    if (fetchAttempts >= MAX_CHUNK_FETCHES) break;
     // Only scan external JS (inline scripts rarely contain chunk refs)
     if (record.asset_type === "inline") continue;
 
@@ -262,15 +259,18 @@ async function discoverChunksFromAssets(
     );
 
     for (const chunk of chunks) {
+      if (fetchAttempts >= MAX_CHUNK_FETCHES) break;
       const candidates = resolveChunkRef(chunk, record.url, publicPath);
 
       for (const candidateUrl of candidates) {
         if (seenUrls.has(normalizeForDedup(candidateUrl))) continue;
-        seenUrls.add(normalizeForDedup(candidateUrl));
+        if (fetchAttempts >= MAX_CHUNK_FETCHES) break;
+        fetchAttempts++;
 
         try {
           const chunkRecord = await fetchAsset(candidateUrl, record.url, false, ctx);
           if (chunkRecord) {
+            seenUrls.add(normalizeForDedup(candidateUrl));
             ctx.logger.info(
               `Chunk discovery: fetched ${candidateUrl} (via ${chunk.source})`,
               { stage: "stage-1", asset_url: record.url }
@@ -400,23 +400,31 @@ async function discoverNextJsChunks(
       while ((match = NEXT_MANIFEST_CHUNK_RE.exec(res.body)) !== null) {
         const rawPath = match[1];
 
-        // Build the full URL — paths start with _next/ (already relative to origin)
+        // Build the full URL — only same-origin /_next/ paths (reject absolute foreign hosts)
         let chunkUrl: string;
         try {
-          chunkUrl = rawPath.startsWith("http")
-            ? rawPath
-            : new URL(rawPath.startsWith("/") ? rawPath : `/_next/static/${rawPath}`, origin).href;
+          if (rawPath.startsWith("http")) {
+            const abs = new URL(rawPath);
+            if (abs.origin !== origin) continue;
+            chunkUrl = abs.href;
+          } else {
+            const path = rawPath.startsWith("/") ? rawPath : `/_next/static/${rawPath}`;
+            if (!path.includes("/_next/")) continue;
+            chunkUrl = new URL(path, origin).href;
+          }
         } catch {
           continue;
         }
 
         const normalized = chunkUrl.toLowerCase().replace(/\/$/, "");
         if (seenUrls.has(normalized)) continue;
-        seenUrls.add(normalized);
 
         try {
           const chunkRecord = await fetchAsset(chunkUrl, manifestUrl, false, ctx);
-          if (chunkRecord) discovered.push(chunkRecord);
+          if (chunkRecord) {
+            seenUrls.add(normalized);
+            discovered.push(chunkRecord);
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           ctx.logger.debug(`Crawler: failed to fetch Next.js chunk ${chunkUrl}: ${msg}`, {
@@ -459,7 +467,10 @@ async function discoverSitemapPages(
     if (robotsRes.status >= 200 && robotsRes.status < 300) {
       const robotsSitemaps = [...robotsRes.body.matchAll(/^Sitemap:\s*(.+)$/gim)]
         .map((m) => m[1].trim())
-        .filter((u) => u.startsWith("http"));
+        .filter((u) => {
+          if (!u.startsWith("http")) return false;
+          return sameOrigin(origin, u);
+        });
       sitemapUrls.push(...robotsSitemaps);
       if (robotsSitemaps.length > 0) {
         ctx.logger.debug(
@@ -482,11 +493,17 @@ async function discoverSitemapPages(
 
   const parseSitemap = async (url: string) => {
     if (processedSitemaps.has(url)) return;
+    // Only fetch same-origin sitemap documents
+    if (!sameOrigin(origin, url)) {
+      ctx.logger.debug(`Sitemap: skipping off-origin sitemap ${url}`, { stage: "stage-1" });
+      return;
+    }
     processedSitemaps.add(url);
 
     try {
       const res = await fetchUrl(url, ctx);
       if (res.status < 200 || res.status >= 300) return;
+      if (!sameOrigin(origin, res.url)) return;
 
       const body = res.body;
 

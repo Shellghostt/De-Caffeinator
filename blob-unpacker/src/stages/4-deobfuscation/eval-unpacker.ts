@@ -1,16 +1,22 @@
 // ============================================================
 // STAGE 4 — EVAL UNPACKER
 // Detects and unwraps eval(atob(...)), eval(unescape(...)),
-// and Function(...)() packing patterns.
-// Uses Node's vm.runInNewContext with a strict resource budget.
-// NEVER executes arbitrary code — only known safe decode ops.
+// Function(...)(), and Dean Edwards packer patterns.
+// Uses STATIC decoding only — never executes untrusted code.
 // ============================================================
-
-import * as vm from "vm";
 
 export interface EvalUnpackResult {
   unpacked: boolean;
   code: string;
+}
+
+export interface EvalUnpackOptions {
+  /**
+   * When false, skip all unpack paths that involve packed loaders.
+   * Static string unwraps (atob / unescape / Function body extract) still run.
+   * Default: true (static Dean Edwards unpack allowed).
+   */
+  evalSandbox?: boolean;
 }
 
 // Patterns indicating packed code
@@ -19,10 +25,15 @@ const EVAL_UNESCAPE_RE = /\beval\s*\(\s*(?:unescape|decodeURIComponent)\s*\(/;
 const FUNCTION_CONSTRUCTOR_RE = /\bnew\s+Function\s*\(\s*["'`][\s\S]{0,50}["'`]\s*\)/;
 const P_A_C_K_E_R_RE = /eval\(function\(p,a,c,k,e,(?:d|r)\)/; // dean edwards packer
 
-export function evalUnpack(code: string): EvalUnpackResult {
-  // ── Dean Edwards p,a,c,k,e,r ─────────────────────────────
-  if (P_A_C_K_E_R_RE.test(code)) {
-    const result = unpackDeanEdwards(code);
+export function evalUnpack(
+  code: string,
+  options: EvalUnpackOptions = {}
+): EvalUnpackResult {
+  const allowPacker = options.evalSandbox !== false;
+
+  // ── Dean Edwards p,a,c,k,e,r (static only — never vm) ────
+  if (allowPacker && P_A_C_K_E_R_RE.test(code)) {
+    const result = unpackDeanEdwardsStatic(code);
     if (result) return { unpacked: true, code: result };
   }
 
@@ -48,22 +59,72 @@ export function evalUnpack(code: string): EvalUnpackResult {
 }
 
 // ----------------------------------------------------------
-// DEAN EDWARDS p,a,c,k,e,r
-// Safe to run in a sandbox — it only does string replacement
+// DEAN EDWARDS p,a,c,k,e,r — static unpack (no code execution)
+// Extracts payload + dictionary from the packer call site and
+// performs the standard base-N token substitution in plain JS.
 // ----------------------------------------------------------
 
-function unpackDeanEdwards(code: string): string | null {
+function unpackDeanEdwardsStatic(code: string): string | null {
+  // Common call form:
+  //   }('payload',62,count,'w0|w1|...'.split('|'),0,{}))
+  // Quotes may be ' or "
+  const callRe =
+    /}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\.split\s*\(\s*(['"])\|?\7\s*\)/;
+  const m = callRe.exec(code);
+  if (!m) return null;
+
   try {
-    const sandbox = {
-      result: null as string | null,
-      // Override eval to capture the unpacked output instead of executing it
-      eval: (s: string) => { sandbox.result = s; },
-    };
-    vm.runInNewContext(code, sandbox, { timeout: 2000 });
-    return sandbox.result;
+    const payload = unescapePackerString(m[2]);
+    const radix = parseInt(m[3], 10);
+    let count = parseInt(m[4], 10);
+    const dictionary = m[6].split("|");
+
+    if (!Number.isFinite(radix) || radix < 2 || radix > 95) return null;
+    if (!Number.isFinite(count) || count < 0 || count > 500_000) return null;
+    if (dictionary.length === 0) return null;
+
+    return substitutePacker(payload, radix, count, dictionary);
   } catch {
     return null;
   }
+}
+
+function unescapePackerString(s: string): string {
+  return s
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\r")
+    .replace(/\\t/g, "\t")
+    .replace(/\\'/g, "'")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
+
+function packerEncode(c: number, radix: number): string {
+  return (
+    (c < radix ? "" : packerEncode(Math.floor(c / radix), radix)) +
+    ((c %= radix) > 35 ? String.fromCharCode(c + 29) : c.toString(36))
+  );
+}
+
+function substitutePacker(
+  payload: string,
+  radix: number,
+  count: number,
+  dictionary: string[]
+): string {
+  let p = payload;
+  let c = count;
+
+  while (c--) {
+    const token = packerEncode(c, radix);
+    const replacement = dictionary[c];
+    if (!replacement) continue;
+    // Escape regex metacharacters in the token
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    p = p.replace(new RegExp("\\b" + escaped + "\\b", "g"), replacement);
+  }
+
+  return p;
 }
 
 // ----------------------------------------------------------
@@ -86,7 +147,8 @@ function unwrapEvalAtob(code: string): string | null {
 // ----------------------------------------------------------
 
 function unwrapEvalUnescape(code: string): string | null {
-  const match = /eval\s*\(\s*(?:unescape|decodeURIComponent)\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/.exec(code);
+  const match =
+    /eval\s*\(\s*(?:unescape|decodeURIComponent)\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/.exec(code);
   if (!match) return null;
   try {
     return decodeURIComponent(match[1].replace(/%(?![\dA-Fa-f]{2})/g, "%25"));
@@ -123,9 +185,10 @@ export function isStillPacked(code: string): boolean {
   // Pattern 1: Dean Edwards packer — eval(function(p,a,c,k,e,d){...})
   if (P_A_C_K_E_R_RE.test(code)) return true;
 
-  // Pattern 2: Obfuscator.io-style hex string arrays
-  // Look for declarations like `var _0x1234 = [...]` with at least a few entries
-  const HEX_ARRAY_RE = /\b_0x[0-9a-f]{2,6}\s*=\s*\[/i;
+  // Pattern 2: Obfuscator.io-style hex string arrays with multiple entries
+  // Require at least a few quoted strings in the array to reduce false positives
+  const HEX_ARRAY_RE =
+    /\b_0x[0-9a-f]{2,6}\s*=\s*\[\s*(?:['"`][^'"`]*['"`]\s*,\s*){2,}['"`]/i;
   if (HEX_ARRAY_RE.test(code)) return true;
 
   return false;

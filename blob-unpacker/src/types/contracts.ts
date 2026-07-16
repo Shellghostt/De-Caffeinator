@@ -37,15 +37,14 @@ export type MapSource =
   | "comment"           // //# sourceMappingURL=...
   | "header"            // SourceMap: or X-SourceMap: HTTP headers
   | "inferred"          // Heuristic: tried appending .map to URL
-  | "embedded_data_uri" // data:application/json;base64,... inline
-  | null;               // No map found
+  | "embedded_data_uri"; // data:application/json;base64,... inline
 
 export interface AssetWithMapInfo extends AssetRecord {
   /** The resolved URL of the source map, or null if none found */
   map_url: string | null;
-  /** Which detection strategy found the map */
-  map_source: MapSource;
-  /** Raw content of the .map file if already fetched (e.g. embedded data URI) */
+  /** Which detection strategy found the map (undefined when none) */
+  map_source?: MapSource;
+  /** Raw content of the .map file — required before Stage 3 */
   map_content?: string;
 }
 
@@ -84,15 +83,6 @@ export type DeobfuscationTechnique =
   | "beautify"
   | "webpack_split"
   | "eval_unpack"
-  | "string_array_resolve"
-  | "hex_call_resolve"
-  | "constant_fold"
-  | "unicode_decode"
-  | "dead_code_eliminate"
-  | "control_flow_unflatten"
-  | "iife_alias_resolve"
-  | "library_detect"
-  | "context_rename"
   | "webcrack";
 
 export interface WebpackModule {
@@ -146,6 +136,8 @@ export interface DiscoveredEndpoint {
   line: number;
   /** Surrounding code context (a few lines) */
   context_snippet: string;
+  /** Route classification from keyword / context heuristics */
+  classification?: "public" | "internal" | "hidden";
 }
 
 export interface DiscoveredSecret {

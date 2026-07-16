@@ -75,8 +75,10 @@ export class PipelineOrchestrator {
         }
       }
 
-      // Politeness delay between dequeue attempts
-      await sleep(this.ctx.config.http.delay_between_ms);
+      // Politeness delay is enforced in fetchUrl per-host — do not double-sleep here
+      if (!asset) {
+        await sleep(Math.min(50, this.ctx.config.http.delay_between_ms || 50));
+      }
     }
 
     this.ctx.logger.info("All assets processed. Queue drained.", { stage: "orchestrator" });
@@ -102,14 +104,18 @@ export class PipelineOrchestrator {
       let deobfuscated: DeobfuscatedAsset | null = null;
 
       // ── BRANCH DECISION ──────────────────────────────────
-      if (assetWithMap.map_url !== null || assetWithMap.map_content !== undefined) {
+      // Only enter Stage 3 when map content was actually fetched
+      if (assetWithMap.map_content) {
         // MAP FOUND → Stage 3
         this.ctx.state.setAssetStatus(url, "reconstructing");
         reconstructed = await this.runStage3(assetWithMap);
-        this.ctx.state.setAssetReconstructionType(
-          url,
-          reconstructed.coverage === "full" ? "full" : "partial"
-        );
+        const reconType =
+          reconstructed.coverage === "full"
+            ? "full"
+            : reconstructed.coverage === "partial"
+              ? "partial"
+              : "none";
+        this.ctx.state.setAssetReconstructionType(url, reconType);
 
         // OVERLAP RULE: partial reconstruction → also run Stage 4 on unmapped chunks
         if (
@@ -193,13 +199,25 @@ export class PipelineOrchestrator {
 
     const result = await this.stages.deobfuscate(js, assetUrl, depth, this.ctx);
 
-    // ── RECURSION RULE ────────────────────────────────────
-    if (result.still_packed && depth < maxDepth) {
+    // ── RECURSION RULE — require measurable progress ───────
+    const shrunk =
+      result.readable_js.length > 0 &&
+      result.readable_js.length < js.length * 0.95;
+    const techniquesGrew = result.techniques_applied.length > 0;
+
+    if (result.still_packed && depth < maxDepth && (shrunk || techniquesGrew)) {
       this.ctx.logger.info(
         `Asset still packed after pass ${depth}. Re-running Stage 4 (depth ${depth + 1}/${maxDepth})`,
         { stage: "stage-4", asset_url: assetUrl }
       );
       return await this.runStage4(result.readable_js, assetUrl, depth + 1);
+    }
+
+    if (result.still_packed && depth < maxDepth && !shrunk && !techniquesGrew) {
+      this.ctx.logger.warn(
+        `Stage 4: still_packed but no progress — stopping recursion for ${assetUrl}`,
+        { stage: "stage-4", asset_url: assetUrl }
+      );
     }
 
     if (result.still_packed && depth >= maxDepth) {

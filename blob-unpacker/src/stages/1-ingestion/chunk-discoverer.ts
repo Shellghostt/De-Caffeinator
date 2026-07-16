@@ -56,7 +56,7 @@ const VITE_GLOB_RE = /import\.meta\.glob\s*\(\s*["'`]([^"'`]+)["'`]/g;
 
 // ── Generic publicPath + chunk patterns ─────────────────────
 // e.g. "https://cdn.example.com/js/" used as prefix
-const PUBLIC_PATH_RE = /(?:__webpack_require__\.p|__webpack_public_path__|publicPath)\s*=\s*["']([^"']+)["']/g;
+const PUBLIC_PATH_RE = /(?:__webpack_require__\.p|__webpack_public_path__|publicPath)\s*=\s*["']([^"']+)["']/;
 
 // ── Broad absolute JS path literal (Hellhound-Spider line 4399) ─
 // Scans for ANY string literal containing an absolute path ending in .js.
@@ -174,25 +174,24 @@ export function resolveChunkRef(
   const candidates: string[] = [];
   const bases: string[] = [];
 
-  // Build candidate base URLs
+  // Prefer publicPath when present; otherwise asset dir (+ parent). Avoid origin-root
+  // speculation for relative refs — it causes false-positive fetch storms.
   if (publicPath) {
     bases.push(publicPath);
-  }
-
-  // Derive base from the asset URL (e.g., https://example.com/static/js/main.js → https://example.com/static/js/)
-  try {
-    const assetBase = new URL(".", assetUrl).href;
-    bases.push(assetBase);
-
-    // Also try one level up (common: chunks sit next to the main bundle)
-    const parentBase = new URL("..", assetUrl).href;
-    bases.push(parentBase);
-
-    // Also try the origin root
-    const origin = new URL(assetUrl).origin + "/";
-    bases.push(origin);
-  } catch {
-    // Not a valid URL — skip
+    try {
+      bases.push(new URL(".", assetUrl).href);
+    } catch { /* skip */ }
+  } else {
+    try {
+      bases.push(new URL(".", assetUrl).href);
+      bases.push(new URL("..", assetUrl).href);
+      // Absolute paths starting with / can resolve from origin
+      if (raw.startsWith("/")) {
+        bases.push(new URL(assetUrl).origin + "/");
+      }
+    } catch {
+      // Not a valid URL — skip
+    }
   }
 
   // If there are no bases, we can't resolve

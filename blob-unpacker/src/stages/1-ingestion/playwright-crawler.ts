@@ -53,6 +53,8 @@ export async function playwrightCrawl(
   const cfg = ctx.config.playwright;
   if (!cfg?.enabled) return [];
 
+  loadOrderOffset = 10000;
+
   // Lazy-import playwright to avoid hard dependency when not enabled
   let playwright: typeof import("playwright");
   try {
@@ -75,24 +77,39 @@ export async function playwrightCrawl(
 
   /** Full normalized URL dedup (with query) */
   const discoveredUrls = new Set<string>();
-  /** Path-only dedup — prevents timestamp-varying ?ver= from causing duplicate fetches.
-   *  e.g. complianz-gdpr uses a live unix timestamp in ?ver= so each page visit
-   *  gets a different URL for the exact same file. */
+  /** Path+host dedup — prevents timestamp-varying ?ver= from causing duplicate fetches.
+   *  Key includes hostname so cdnA/app.js and cdnB/app.js are distinct. */
   const discoveredPaths = new Set<string>();
 
   // Pre-populate path dedup from known static URLs
   for (const url of knownUrls) {
-    try { discoveredPaths.add(new URL(url).pathname.toLowerCase()); } catch { /* skip */ }
+    try {
+      const u = new URL(url);
+      discoveredPaths.add(`${u.hostname.toLowerCase()}|${u.pathname.toLowerCase()}`);
+    } catch { /* skip */ }
   }
 
   const records: AssetRecord[] = [];
 
+  // Target origin for same-site filtering of intercepted fetches
+  let targetOrigin = "";
+  let targetHost = "";
   try {
+    const seed = ctx.config.target_urls[0];
+    if (seed) {
+      const u = new URL(seed.startsWith("http") ? seed : `https://${seed}`);
+      targetOrigin = u.origin;
+      targetHost = u.hostname.replace(/^www\./, "").toLowerCase();
+    }
+  } catch { /* leave empty — allow all (SSRF still guarded in fetchUrl) */ }
+
+  try {
+    // Prefer sandboxed Chromium; only disable sandbox in known container CI envs
+    const inContainer = Boolean(process.env.CI || process.env.KUBERNETES_SERVICE_HOST);
     browser = await browserType.launch({
       headless: cfg.headless,
       args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
+        ...(inContainer ? ["--no-sandbox", "--disable-setuid-sandbox"] : []),
         "--disable-dev-shm-usage",
         "--disable-gpu",
       ],
@@ -101,7 +118,17 @@ export async function playwrightCrawl(
     const pagesToVisit = pageUrls.slice(0, cfg.max_pages);
 
     for (const pageUrl of pagesToVisit) {
-      const pageRecords = await visitPage(pageUrl, browser, knownUrls, discoveredUrls, discoveredPaths, cfg, ctx);
+      const pageRecords = await visitPage(
+        pageUrl,
+        browser,
+        knownUrls,
+        discoveredUrls,
+        discoveredPaths,
+        cfg,
+        ctx,
+        targetOrigin,
+        targetHost
+      );
       records.push(...pageRecords);
     }
   } catch (err) {
@@ -133,10 +160,13 @@ async function visitPage(
   discoveredUrls: Set<string>,
   discoveredPaths: Set<string>,
   cfg: NonNullable<PipelineContext["config"]["playwright"]>,
-  ctx: PipelineContext
+  ctx: PipelineContext,
+  targetOrigin: string,
+  targetHost: string
 ): Promise<AssetRecord[]> {
   const records: AssetRecord[] = [];
   const intercepted: string[] = [];
+  const MAX_INTERCEPTS = 200;
 
   let page: import("playwright").Page | null = null;
   try {
@@ -152,12 +182,29 @@ async function visitPage(
     // resolves to a .js URL. Abort is NOT used — we let all
     // requests complete so the page renders fully.
     page.on("request", (req) => {
+      if (intercepted.length >= MAX_INTERCEPTS) return;
+
       const type = req.resourceType();
       const url = req.url();
 
       if (!JS_RESOURCE_TYPES.has(type)) return;
       if (NON_JS_EXTENSIONS.test(url)) return;
       if (!url.startsWith("http")) return;
+
+      // Restrict re-fetches to target site (+ subdomains). Private IPs still
+      // blocked in fetchUrl. Third-party CDNs on unrelated hosts are skipped
+      // to limit SSRF / fetch storms (static crawl already covers linked CDNs).
+      if (targetHost) {
+        try {
+          const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+          const allowed =
+            host === targetHost ||
+            host.endsWith("." + targetHost);
+          if (!allowed) return;
+        } catch {
+          return;
+        }
+      }
 
       // For non-script resource types, only accept URLs that look like JS
       if (type !== "script" && !url.split("?")[0].endsWith(".js")) return;
@@ -166,14 +213,15 @@ async function visitPage(
       if (knownUrls.has(normalized)) return;
       if (discoveredUrls.has(normalized)) return;
 
-      // Path-level dedup: strip query string to catch timestamp-varying ?ver= params.
-      // Example: complianz-gdpr appends a live unix timestamp to ?ver= on every page load,
-      // producing a unique URL for the same file each time. Without this, we'd fetch
-      // the identical file N times (once per page visited).
-      let urlPath: string;
-      try { urlPath = new URL(url).pathname.toLowerCase(); } catch { urlPath = url; }
-      if (discoveredPaths.has(urlPath)) return;
-      discoveredPaths.add(urlPath);
+      let pathKey: string;
+      try {
+        const u = new URL(url);
+        pathKey = `${u.hostname.toLowerCase()}|${u.pathname.toLowerCase()}`;
+      } catch {
+        pathKey = url;
+      }
+      if (discoveredPaths.has(pathKey)) return;
+      discoveredPaths.add(pathKey);
 
       intercepted.push(url);
       discoveredUrls.add(normalized);
@@ -207,6 +255,18 @@ async function visitPage(
       const res = await fetchUrl(url, ctx);
 
       if (res.status < 200 || res.status >= 300) continue;
+
+      // Drop redirects that escape the target origin
+      if (targetOrigin) {
+        try {
+          const finalHost = new URL(res.url).hostname.replace(/^www\./, "").toLowerCase();
+          if (finalHost !== targetHost && !finalHost.endsWith("." + targetHost)) {
+            continue;
+          }
+        } catch {
+          continue;
+        }
+      }
 
       const ct = res.headers["content-type"] ?? "";
       if (!isJavaScript(res.body, ct)) continue;

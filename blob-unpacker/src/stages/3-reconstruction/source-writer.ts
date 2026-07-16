@@ -10,6 +10,7 @@ import * as path from "path";
 import { ReconstructedFile } from "../../types/contracts";
 import { PipelineContext } from "../../core/context";
 import { getAssetDir } from "../../lib/paths";
+import { isPathInside, sanitizeSourcePath } from "../../lib/safe-path";
 
 export function writeSourceFiles(
   files: ReconstructedFile[],
@@ -28,9 +29,9 @@ export function writeSourceFiles(
 
   for (const file of files) {
     try {
-      // Extra safety: prevent any path traversal in the final resolved path
-      const outPath = path.resolve(baseDir, file.path);
-      if (!outPath.startsWith(path.resolve(baseDir))) {
+      const safeRel = sanitizeSourcePath(file.path);
+      const outPath = path.resolve(baseDir, safeRel);
+      if (!isPathInside(baseDir, outPath)) {
         ctx.logger.warn(`Source writer: blocked path traversal attempt: ${file.path}`, {
           stage: "stage-3",
         });
@@ -39,7 +40,7 @@ export function writeSourceFiles(
 
       fs.mkdirSync(path.dirname(outPath), { recursive: true });
       fs.writeFileSync(outPath, file.content, "utf-8");
-      writtenPaths.push(file.path);
+      writtenPaths.push(safeRel);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       ctx.logger.warn(`Source writer: failed to write ${file.path}: ${msg}`, {
@@ -84,6 +85,12 @@ export function writeMapFile(
 
   try {
     const mapPath = path.join(baseDir, "_sourcemap.map");
+    if (!isPathInside(baseDir, mapPath)) {
+      ctx.logger.warn(`Source writer: refused to write .map outside base dir`, {
+        stage: "stage-3",
+      });
+      return;
+    }
     fs.mkdirSync(path.dirname(mapPath), { recursive: true });
     fs.writeFileSync(mapPath, mapContent, "utf-8");
     ctx.logger.info(`Source writer: saved raw .map file to sources/${assetHash}/_sourcemap.map`, {

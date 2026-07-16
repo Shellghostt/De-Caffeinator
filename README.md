@@ -1,8 +1,31 @@
-# Blob Unpacker
+# De-Caffeinator
 
-**A production-grade JavaScript reverse engineering and asset analysis pipeline for security auditing.**
+**JavaScript reverse engineering and asset analysis for authorized security audits.**
 
-Blob Unpacker crawls a target website, downloads every JavaScript file it can find, de-obfuscates and de-minifies them using the powerful webcrack engine, and then extracts security-relevant artifacts — API endpoints, secrets, developer comments, and configuration values. All output is organized into clean per-hostname directories ready for analysis.
+De-Caffeinator (package: `blob-unpacker`) crawls a target site, recovers every JavaScript asset it can find, reconstructs sources from maps when available, statically unpacks and de-obfuscates bundles, then extracts endpoints, secrets, comments, and configs into a clean per-host report.
+
+```text
+  Target URL
+      │
+      ▼
+ ┌────────────┐    ┌──────────────┐    ┌────────────────┐
+ │  Ingest JS │───▶│ Detect maps  │───▶│ Reconstruct or │
+ │  (crawl)   │    │  (.map)      │    │ de-obfuscate   │
+ └────────────┘    └──────────────┘    └───────┬────────┘
+                                               │
+                                               ▼
+                                    ┌────────────────────┐
+                                    │ Extract artifacts  │
+                                    │ endpoints · secrets│
+                                    │ comments · configs │
+                                    └─────────┬──────────┘
+                                              │
+                                              ▼
+                                    ┌────────────────────┐
+                                    │ Per-host output    │
+                                    │ + Zod contracts    │
+                                    └────────────────────┘
+```
 
 ---
 
@@ -12,21 +35,13 @@ Blob Unpacker crawls a target website, downloads every JavaScript file it can fi
 - [Quick Start](#quick-start)
 - [Installation](#installation)
 - [Usage](#usage)
-  - [Interactive Launcher](#interactive-launcher)
-  - [Direct CLI](#direct-cli)
-  - [CLI Options](#cli-options)
-- [Pipeline Architecture](#pipeline-architecture)
-  - [Stage 1 — Ingestion](#stage-1--ingestion)
-  - [Stage 2 — Source Map Detection](#stage-2--source-map-detection)
-  - [Stage 3 — Source Reconstruction](#stage-3--source-reconstruction)
-  - [Stage 4 — De-obfuscation & De-minification](#stage-4--de-obfuscation--de-minification)
-  - [Stage 5 — Artifact Extraction](#stage-5--artifact-extraction)
-  - [Stage 6 — Output](#stage-6--output)
+- [Architecture](#architecture)
+- [Security Hardening](#security-hardening)
 - [Output Structure](#output-structure)
-- [De-obfuscation Techniques](#de-obfuscation-techniques)
 - [Extraction Capabilities](#extraction-capabilities)
 - [Project Structure](#project-structure)
 - [Tech Stack](#tech-stack)
+- [Testing](#testing)
 - [Known Limitations](#known-limitations)
 - [Contributing](#contributing)
 - [License](#license)
@@ -35,45 +50,44 @@ Blob Unpacker crawls a target website, downloads every JavaScript file it can fi
 
 ## Features
 
-- **Automated JS Discovery** — Crawls HTML pages, follows same-origin links, parses Webpack chunk IDs, and fetches Next.js `_buildManifest.js` to find every JavaScript file on a target site.
-- **Webcrack De-obfuscation** — Powered by the modern `webcrack` engine to automatically unbundle Webpack/Browserify modules, resolve obfuscator.io string arrays, fold constants, and remove dead code.
-- **Source Map Recovery** — Automatically probes for `.map` files and reconstructs original TypeScript/React source code when available.
-- **Security Artifact Extraction** — Discovers API endpoints, hardcoded secrets, developer comments, and environment configuration values using fast `acorn` AST parsing.
-- **Clean Per-Hostname Output** — Each scanned website gets its own output directory. Third-party assets are neatly segregated into a `third-party/` subfolder to keep the primary target analysis focused.
-- **Recursive Unpacking** — If code is still explicitly packed (e.g., using `eval()` or dean edwards packing) after a full pass, Stage 4 unwraps it and re-runs automatically (up to a configurable depth).
-- **False-Positive Filtered Secrets** — Entropy-based secret detection tuned with robust heuristics to filter out hashes, CSS class names, and common false positives.
-- **Content-Hash Deduplication** — Same JS file across multiple pages is only processed once.
+| Area | What you get |
+|------|----------------|
+| **Discovery** | HTML scripts, same-origin BFS crawl, Webpack/Vite chunks, Next.js `_buildManifest`, optional Playwright SPA intercepts, optional Wayback CDX |
+| **Source maps** | Comment / header / path inference; full & partial reconstruction; index-map merge with remapped VLQ indices |
+| **De-obfuscation** | Static packer unwrap (no `node:vm`), then `webcrack` (unbundle / deobfuscate / unminify), beautify, progress-gated recursion |
+| **Extraction** | Endpoints, secrets (entropy + prefix heuristics), AST comments, env/config blocks; custom regex patterns supported |
+| **Output** | Per-hostname dirs, first-party vs third-party split, `secrets.json`, Zod-validated contracts |
+| **Safety** | SSRF guards, response size caps, path containment, serialized state, validated CLI numbers |
 
 ---
 
 ## Quick Start
 
 ```bash
-# Clone the repo
 git clone https://github.com/addydude/De-Caffeinator.git
 cd De-Caffeinator/blob-unpacker
 
-# Install dependencies
 npm install
 
-# Run against a target
+# Scan a target (http/https only)
 npx ts-node src/index.ts https://example.com
 
-# Or use the interactive launcher
-python run.py
+# Or via the Python launcher
+python run.py https://example.com --quick
 ```
+
+Presets: `--quick` · `--stealth` · `--deep`
 
 ---
 
 ## Installation
 
-### Prerequisites
+**Prerequisites**
 
-- **Node.js** >= 18.x
-- **npm** >= 9.x
-- **Python** >= 3.8 (optional, for the interactive launcher)
-
-### Setup
+- Node.js >= 18
+- npm >= 9
+- Python >= 3.8 (optional — `run.py` launcher)
+- Playwright browsers only if you use `--playwright` (`npx playwright install chromium`)
 
 ```bash
 cd blob-unpacker
@@ -84,167 +98,229 @@ npm install
 
 ## Usage
 
-### Interactive Launcher
-
-The recommended way to run Blob Unpacker is through the interactive Python launcher:
-
-```bash
-python run.py
-```
-
-This presents a menu-driven interface with preset scan profiles:
-
-| Profile | Depth | Pages | Concurrency | Best For |
-|---------|-------|-------|-------------|----------|
-| **Quick Scan** | 1 | 20 | 3 | Initial recon |
-| **Full Scan** | 3 | 100 | 5 | Thorough analysis |
-| **Deep Scan** | 5 | 500 | 8 | Large applications |
-| **Stealth Scan** | 2 | 50 | 2 | Rate-limited targets |
-
-### Direct CLI
+### CLI
 
 ```bash
 npx ts-node src/index.ts <url> [options]
 ```
 
-### CLI Options
+### Options
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--output <dir>` | `-o` | `./output` | Output directory |
-| `--format <fmt>` | `-f` | `json` | Data format: `json` or `jsonl` |
-| `--depth <n>` | `-d` | `2` | Max crawl depth for link following |
+| `--output <dir>` | `-o` | `./output` | Output root |
+| `--format <fmt>` | `-f` | `json` | `json` or `jsonl` |
+| `--depth <n>` | `-d` | `2` | Max link-follow depth |
 | `--pages <n>` | `-p` | `50` | Max pages to crawl |
-| `--concurrency <n>` | `-c` | `5` | Max concurrent HTTP requests |
-| `--timeout <ms>` | `-t` | `15000` | HTTP request timeout in ms |
-| `--delay <ms>` | | `300` | Politeness delay between requests |
-| `--deobf-depth <n>` | | `5` | Max recursive de-obfuscation passes |
-| `--entropy <n>` | | `4.5` | Min Shannon entropy for secret detection |
-| `--playwright` | | | Enable Playwright SPA_DOM crawling |
-| `--pw-browser` | | `chromium` | Playwright browser to use |
-| `--pw-timeout` | | `15000` | Playwright navigation timeout in ms |
-| `--wayback` | | | Enable Wayback Machine CDX API query |
+| `--concurrency <n>` | `-c` | `5` | Max concurrent fetches (clamped ≥ 1) |
+| `--timeout <ms>` | `-t` | `15000` | Per-request timeout |
+| `--delay <ms>` | | `300` | Per-host politeness delay |
+| `--deobf-depth <n>` | | `5` | Max Stage 4 recursion passes |
+| `--entropy <n>` | | `4.5` | Min Shannon entropy for secrets |
+| `--playwright` | | off | Headless SPA / network intercept crawl |
+| `--pw-browser` | | `chromium` | `chromium` \| `firefox` \| `webkit` |
+| `--wayback` | | off | Wayback Machine CDX discovery |
 | `--no-chunks` | | | Disable dynamic chunk discovery |
-| `--no-files` | | | Don't write source/deobfuscated files |
-| `--user-agent <str>` | | | Custom User-Agent string |
+| `--no-files` | | | Skip writing source / deobfuscated files |
+| `--user-agent <str>` | | | Custom User-Agent |
+| `--quick` / `--stealth` / `--deep` | | | Scan profiles |
+
+### Python launcher
+
+```bash
+python run.py https://example.com --deep --playwright
+```
+
+On Windows the launcher runs `npx.cmd` with `shell=False` (no `cmd.exe` interpolation).
 
 ---
 
-## Pipeline Architecture
+## Architecture
 
-Blob Unpacker processes JavaScript through a 6-stage pipeline. Each asset flows through the stages independently, with concurrency managed by an internal queue.
+### System overview
 
-```text
-                       ┌─────────────────────┐
-                       │    CLI / run.py      │
-                       │    src/index.ts      │
-                       └─────────┬───────────┘
-                                 │
-                       ┌─────────▼───────────┐
-                       │  PipelineContext     │
-                       │  (config, logger,    │
-                       │   state, results)    │
-                       └─────────┬───────────┘
-                                 │
-                  ┌──────────────▼──────────────┐
-                  │    Stage 1: Ingestion        │
-                  │    Discover & download JS    │
-                  └──────────────┬──────────────┘
-                                 │ AssetRecord[]
-                       ┌─────────▼───────────┐
-                       │    AssetQueue        │
-                       │    (dedup, concur.)  │
-                       └─────────┬───────────┘
-                                 │ per asset
-                  ┌──────────────▼──────────────┐
-                  │  Stage 2: Map Detection      │
-                  │  Check for .map files        │
-                  └──────┬──────────────┬───────┘
-                         │              │
-                    map found       no map
-                         │              │
-              ┌──────────▼──────┐ ┌─────▼────────────┐
-              │  Stage 3:       │ │  Stage 4:        │
-              │  Reconstruction │ │  De-obfuscation  │◄─┐
-              │  (source map)   │ │  (webcrack)      │──┘ recursive
-              └──────┬──────────┘ └─────┬────────────┘    if still packed
-                     │                  │                 (e.g., eval wrappers)
-                     │  unmapped chunks │
-                     │        ├─────────┘
-                     │        │
-              ┌──────▼────────▼─────────┐
-              │  Stage 5: Extraction    │
-              │  Endpoints, secrets,    │
-              │  comments, configs      │
-              └──────────┬──────────────┘
-                         │
-              ┌──────────▼──────────────┐
-              │  Stage 6: Output        │
-              │  Per-hostname dirs,     │
-              │  JSON, reports, summary │
-              └─────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph Entry
+    CLI["CLI / run.py"]
+    CTX["PipelineContext\nconfig · logger · state · results"]
+  end
+
+  subgraph Stage1["Stage 1 — Ingestion"]
+    HTML["Entry HTML + scripts"]
+    NEXT["Next.js buildManifest"]
+    SITEMAP["robots / sitemap"]
+    LINKS["Same-origin link BFS"]
+    CHUNKS["Chunk discovery"]
+    PW["Playwright optional"]
+    WB["Wayback optional"]
+  end
+
+  subgraph Core["Core runtime"]
+    Q["AssetQueue\ndedup · concurrency"]
+    ORCH["PipelineOrchestrator"]
+    HTTP["HTTP client\nSSRF · size cap · rate limit"]
+  end
+
+  subgraph Stage2["Stage 2 — Map detection"]
+    CMT["Comment"]
+    HDR["Header"]
+    INF["Path inference"]
+  end
+
+  subgraph Branch{"map_content?"}
+  end
+
+  subgraph Stage3["Stage 3 — Reconstruction"]
+    FULL["Full sourcesContent"]
+    PART["Partial + VLQ fragments"]
+    WRITE["Safe path writer"]
+  end
+
+  subgraph Stage4["Stage 4 — De-obfuscation"]
+    EVAL["Static eval/packer unwrap"]
+    WC["webcrack"]
+    BEAU["Beautify"]
+  end
+
+  subgraph Stage5["Stage 5 — Extraction"]
+    EP["Endpoints"]
+    SEC["Secrets"]
+    COM["Comments"]
+    CFG["Configs"]
+  end
+
+  subgraph Stage6["Stage 6 — Output"]
+    HOST["Per-host layout"]
+    ZOD["Zod contracts"]
+  end
+
+  CLI --> CTX
+  CTX --> Stage1
+  Stage1 --> HTTP
+  Stage1 --> Q
+  Q --> ORCH
+  ORCH --> Stage2
+  Stage2 --> Branch
+  Branch -->|yes| Stage3
+  Branch -->|no| Stage4
+  Stage3 -->|unmapped chunks| Stage4
+  Stage3 --> Stage5
+  Stage4 --> Stage5
+  Stage5 --> Stage6
+  ORCH --> HTTP
 ```
 
-### Stage 1 — Ingestion
+### Per-asset data flow
 
-Discovers and downloads every JavaScript file from the target site using a multi-phase approach:
+```text
+                    ┌─────────────────────────────────────────┐
+                    │              AssetRecord                 │
+                    │  url · hash · raw_content · headers     │
+                    └──────────────────┬──────────────────────┘
+                                       │
+                         ┌─────────────▼─────────────┐
+                         │     Stage 2: detectMap     │
+                         │  comment → header → infer  │
+                         │  (requires map_content)    │
+                         └──────┬──────────────┬──────┘
+                                │              │
+                         map ok │              │ no map
+                                ▼              ▼
+                    ┌──────────────────┐  ┌──────────────────┐
+                    │ Stage 3          │  │ Stage 4          │
+                    │ parse · VLQ      │  │ static unpack →  │
+                    │ full / partial   │  │ webcrack →       │
+                    │ sanitize paths   │  │ beautify         │
+                    └────────┬─────────┘  └────────┬─────────┘
+                             │   unmapped chunks   │
+                             └──────────┬──────────┘
+                                        ▼
+                         ┌──────────────────────────┐
+                         │ Stage 5: regex + AST     │
+                         │ endpoints · secrets · …  │
+                         └────────────┬─────────────┘
+                                      ▼
+                         ┌──────────────────────────┐
+                         │ Stage 6: writeOutputs    │
+                         │ + deobfuscated / sources │
+                         └──────────────────────────┘
+```
 
-| Phase | What It Does |
-|-------|-------------|
-| **1 — Entry Page** | Fetches root HTML, extracts all `<script src>` tags and inline `<script>` blocks |
-| **1b — Next.js Manifest** | Detects `buildId`, fetches `/_next/static/<id>/_buildManifest.js`, discovers all page-specific chunks |
-| **1c — Sitemap Discovery** | Probes `/robots.txt` and `/sitemap.xml`, expands sub-sitemaps, seeds link follower queue |
-| **2 — Link Following** | Parses `<a href>` tags for same-origin pages (priority sorted), fetches them, repeats Phase 1 |
-| **3 — Chunk Discovery** | Scans downloaded JS bundles for dynamic imports, literal path strings, and chunk loaders |
-| **4 — Playwright SPA** | (If `--playwright`) Boots headless browser, intercepts network to catch lazy-loaded scripts |
-| **5 — Wayback Machine** | (If `--wayback`) Queries CDX API to find orphaned/historical JS files no longer linked |
+### Core components
 
-All assets are deduplicated by SHA-256 content hash before entering the processing queue.
+| Component | Role |
+|-----------|------|
+| **`PipelineContext`** | Frozen config (validated/clamped), structured logger, atomic state file, results store |
+| **`AssetQueue`** | URL/hash dedup, concurrency gate, priority dequeue |
+| **`PipelineOrchestrator`** | Branch Stage 3 vs 4, progress-gated Stage 4 recursion, isolation on asset failure |
+| **`lib/http`** | Manual redirects, private-IP / DNS SSRF checks, body byte cap, per-host rate mutex |
+| **`lib/safe-path`** | Source-map path sanitization + separator-safe containment checks |
 
-### Stage 2 — Source Map Detection
+### Stage details
 
-For each JS asset, probes for a source map by:
-1. Scanning for `//# sourceMappingURL=` comments
-2. Probing `<asset_url>.map` via HTTP
-3. Checking response headers for `SourceMap` or `X-SourceMap`
+#### Stage 1 — Ingestion
 
-If found, the full `.map` file is fetched and passed to Stage 3. If not, the asset goes directly to Stage 4.
+Discovers and downloads JS with same-origin discipline:
 
-### Stage 3 — Source Reconstruction
+1. Entry HTML (`<script src>` + inline)
+2. Next.js `_buildManifest` (same-origin `/_next/` only)
+3. `robots.txt` / `sitemap.xml` (same-origin sitemaps only)
+4. Link follower BFS (re-checks origin **after** redirects)
+5. Chunk discovery (capped speculative fetches)
+6. Optional Playwright (target-host filter; `--no-sandbox` only in CI/containers)
+7. Optional Wayback CDX (final host must match target)
 
-Only runs when a source map is available. Parses VLQ-encoded mappings to recover original source files:
+Assets are SHA-256 deduplicated before entering the queue.
 
-- **Full reconstruction** — When `sourcesContent` is present, restores every original file verbatim with the original directory structure
-- **Partial reconstruction** — When only source paths are available, creates fragment files from mapped ranges
-- **Path-only** — When the map has no content, records known file paths for reference
+#### Stage 2 — Source map detection
 
-Any portions that couldn't be mapped are forwarded to Stage 4 as unmapped chunks.
+Priority: comment → `SourceMap` / `X-SourceMap` header → path inference (JSON-validated GET fallback).
 
-### Stage 4 — De-obfuscation & De-minification
+Stage 3 runs **only** when `map_content` was successfully fetched — a map URL alone is not enough.
 
-The core processing engine. Relies on the modern, high-performance **webcrack** engine to analyze and unpack complex minified bundles:
+#### Stage 3 — Source reconstruction
 
-- **Bundle Splitting** — Identifies and unpacks Webpack and Browserify bundles, separating them into individual modules.
-- **Obfuscator Reversal** — Automatically resolves obfuscator.io patterns, including string array rotation and control flow flattening.
-- **Constant Folding & Unicode Decoding** — Evaluates constants and reverts hex/unicode encoded identifiers back to readable strings.
-- **Beautification** — Final formatting with consistent indentation.
+- **Full** — `sourcesContent` present
+- **Partial** — mixed content + VLQ fragments + name annotations
+- **Paths only** — structure recorded; minified body goes to Stage 4
 
-**Recursion Rule:** The 'isPacked' heuristic looks for explicit packing wrappers (e.g., `eval(function(p,a,c,k,e,d)...)`). If detected, it unwraps the payload and feeds it back into Stage 4 — up to `--deobf-depth` times (default: 5).
+All write paths go through `sanitizeSourcePath` + `isPathInside` (blocks `abc` / `abc_evil` prefix bypass). Index maps remapped source/name indices when merging sections.
 
-### Stage 5 — Artifact Extraction
+#### Stage 4 — De-obfuscation
 
-Runs four independent extractors on the readable code, powered by fast `acorn` AST parsing (completely avoiding regexes on raw code where possible):
+1. **Static** unwrap: Dean Edwards packer, `eval(atob)`, `unescape`, `new Function` body extract — **never** `node:vm`
+2. **`webcrack`** — unpack / deobfuscate / unminify
+3. **Beautify** (without unescaping strings before extraction)
+4. Recurse only if still packed **and** code size or techniques show progress
 
-| Extractor | Finds | Confidence Levels |
-|-----------|-------|-------------------|
-| **Endpoint Extractor** | `fetch()`, `axios`, `$.ajax()`, XHR `.open()`, route definitions | High / Medium / Low |
-| **Secret Extractor** | API keys, JWTs, private keys, DB URLs, bearer tokens | Based on Shannon entropy + heuristics |
-| **Comment Extractor** | `TODO`, `FIXME`, `password`, `hack`, internal notes | AST Comment Node categorization |
-| **Config Extractor** | `process.env.*`, `__NEXT_DATA__`, feature flags | Key-value pairs |
+`eval_sandbox: false` skips packer unwrap.
 
-### Stage 6 — Output
+#### Stage 5 — Artifact extraction
 
-Organizes all findings into per-hostname directories. Primary target assets are kept in the root, while third-party scripts (e.g., Google Analytics, Intercom) are cleanly segregated into a `third-party/` subfolder.
+Regex + Acorn AST. Optional custom `endpoint_patterns` / `secret_patterns` from config. Secrets are masked in output.
+
+#### Stage 6 — Output
+
+Per-target host folder, third-party nesting, Zod-validated `endpoints-contract.json` / `artifacts-contract.json`, human `summary.md`.
+
+---
+
+## Security Hardening
+
+Built for scanning **untrusted** frontends on the operator machine:
+
+| Control | Behavior |
+|---------|----------|
+| **SSRF** | `http`/`https` only; block private/reserved IPs (incl. metadata `169.254.169.254`); DNS resolve check; manual redirect re-validation |
+| **DoS** | Max response body size (default 10 MiB); VLQ/mappings size caps; chunk fetch budget |
+| **Path traversal** | Sanitize map `sources[]`; contain writes under `sources/<hash>/` |
+| **Code execution** | No `node:vm` for packers; static substitution only |
+| **Crawl escape** | Same-origin enforced after redirects (pages, sitemaps, Playwright) |
+| **Output** | Secrets masked; short secrets fully redacted |
+| **Config** | Numeric options validated; `max_concurrent` cannot be `0`/`NaN` |
+
+Always obtain authorization before scanning systems you do not own.
 
 ---
 
@@ -252,84 +328,47 @@ Organizes all findings into per-hostname directories. Primary target assets are 
 
 ```text
 output/
-├── index.json                    # Global summary of all scanned hosts
-├── run-report.json               # Aggregate pipeline stats
-├── pipeline.log.jsonl            # Full structured event log
-└── <hostname>/                   # One folder per website
-    ├── deobfuscated/             # Beautified + de-obfuscated JS for primary target
-    │   └── main-chunk.js
-    ├── raw/                      # Original downloaded JS
-    ├── sources/                  # Source-map reconstructed files
-    │   └── <hash>/
-    │       ├── src/App.tsx
-    │       └── src/utils.ts
-    ├── third-party/              # Clean segregation of 3rd party assets
+├── index.json                      # Global multi-host summary (if used)
+└── <hostname>/
+    ├── deobfuscated/               # Beautified / unpacked first-party JS
+    ├── raw/                        # Original downloads
+    ├── sources/<hash>/             # Source-map reconstructed tree
+    ├── third-party/<cdn-host>/     # Vendor assets
     │   ├── deobfuscated/
-    │   │   └── analytics.js
-    │   └── raw/
-    │       └── analytics.js
+    │   ├── raw/
+    │   └── sources/
     ├── manifests/
-    │   ├── endpoints-contract.json
+    │   ├── endpoints-contract.json # Zod-validated
     │   └── artifacts-contract.json
-    ├── endpoints.json            # All discovered API endpoints
-    ├── secrets.json              # Hardcoded secrets and tokens
-    ├── comments.json             # Security-relevant dev comments
-    ├── configs.json              # Environment and config values
-    ├── artifact-index.json       # Per-asset finding counts
-    ├── run-report.json           # Per-host stats
-    └── summary.md                # Human-readable findings report
+    ├── endpoints.json
+    ├── secrets.json                # Masked values
+    ├── comments.json
+    ├── configs.json
+    ├── artifact-index.json
+    ├── run-report.json
+    ├── summary.md
+    └── .pipeline-state.json        # Resumability (atomic writes)
 ```
-
----
-
-## De-obfuscation Techniques
-
-### Obfuscation Reversal 
-- **Eval/Packer Unwrapping** — Safely extracts code hidden inside `eval()`, `new Function()`, and Dean Edwards packer (`p,a,c,k,e,d`) wrappers.
-- **Obfuscator.io Reversal** — Automatically resolves string arrays, un-rotates array indices, and simplifies control flow flattening.
-- **Hex/Unicode String Decoding** — Converts `\u0041` and `_0x1a2b` back to readable strings.
-- **Control Flow Unflattening** — Reconstructs linear code from switch-case state machine patterns used by advanced obfuscators.
-
-### Code Cleanup & Splitting
-- **Bundle Splitting** — Separates Webpack/Browserify bundles into individual module files, drastically improving readability of large single-page applications.
-- **Constant Folding** — Evaluates compile-time-constant expressions (`"hel" + "lo"` → `"hello"`).
-- **Dead Code Elimination** — Removes unreachable code paths (`if(false){...}`).
-- **Beautification** — Consistent indentation and formatting via js-beautify.
 
 ---
 
 ## Extraction Capabilities
 
 ### Endpoints
-Discovers API endpoints from:
-- `fetch("/api/...")` and `fetch(baseUrl + "/path")`
-- `axios.get()`, `axios.post()`, etc.
-- `$.ajax()`, `$.get()`, `$.post()`
-- `XMLHttpRequest.open("GET", "/api/...")`
-- React Router / Next.js route definitions
-- Express-style route patterns
+
+`fetch` / `axios` / jQuery / XHR `.open` (method + URL), route literals, WebSockets. Classified as `public` · `internal` · `hidden`.
 
 ### Secrets
-Detects via AST traversal + Shannon entropy scoring (with strict false-positive filtering):
-- API keys (AWS, Google, Stripe, etc.)
-- JWT tokens and secrets
-- Database connection strings
-- Private keys (RSA, EC)
-- Bearer tokens
-- Hardcoded credentials
+
+AWS / Stripe / GitHub / Slack / Twilio SID shape / JWT three-segment / PEM blocks / DB URLs / high-entropy assignments — with alphabet and encoding-context filters.
 
 ### Comments
-Parses the Abstract Syntax Tree (AST) to extract real developer comments (ignoring object properties or variable names) and flags those containing:
-- `TODO`, `FIXME`, `HACK`, `XXX`
-- `password`, `secret`, `credential`
-- `internal`, `deprecated`, `insecure`
+
+Real AST comments only (`TODO`, `FIXME`, `HACK`, bypass/debug markers) — not minified noise.
 
 ### Configs
-Extracts configuration values from:
-- `process.env.REACT_APP_*`
-- `__NEXT_DATA__` payloads
-- Feature flag definitions
-- Build metadata and version strings
+
+`process.env.*`, `import.meta.env.*`, brace-balanced `firebaseConfig` / Sentry / Amplify-style objects, feature flags.
 
 ---
 
@@ -337,85 +376,82 @@ Extracts configuration values from:
 
 ```text
 blob-unpacker/
-├── run.py                          # Interactive Python launcher
-├── package.json                    # Node.js dependencies
-├── tsconfig.json                   # TypeScript configuration
+├── run.py                          # CLI launcher (shell=False)
+├── package.json
+├── tsconfig.json
 └── src/
-    ├── index.ts                    # CLI entry point & argument parser
+    ├── index.ts                    # Commander CLI + interactive mode
     ├── core/
-    │   ├── context.ts              # PipelineContext, config, logger, state
-    │   ├── pipeline.ts             # PipelineOrchestrator (stage runner)
-    │   └── queue.ts                # AssetQueue (dedup, concurrency)
+    │   ├── context.ts              # Config, logger, state, results
+    │   ├── pipeline.ts             # Orchestrator + branching
+    │   └── queue.ts                # Dedup + concurrency
     ├── lib/
-    │   ├── http.ts                 # HTTP fetch with retry & timeout
-    │   ├── hasher.ts               # SHA-256 content hashing
-    │   └── paths.ts                # Per-hostname output dir helpers
+    │   ├── http.ts                 # SSRF-aware fetch
+    │   ├── safe-path.ts            # Path sanitization
+    │   ├── paths.ts                # First-/third-party layout
+    │   ├── hasher.ts
+    │   ├── html-entities.ts
+    │   └── line-index.ts
     ├── stages/
-    │   ├── 1-ingestion/
-    │   │   ├── index.ts            # runIngestion() entry point
-    │   │   └── ...                 # Web crawlers, link followers, chunk discoverers
-    │   ├── 2-map-detection/
-    │   │   ├── index.ts            # detectMap() entry point
-    │   │   └── ...                 # Comment scanners, HTTP headers, path inference
-    │   ├── 3-reconstruction/
-    │   │   ├── index.ts            # reconstruct() entry point
-    │   │   └── ...                 # VLQ decoding, source extractors
-    │   ├── 4-deobfuscation/
-    │   │   ├── index.ts            # deobfuscate() entry point (webcrack wrapper)
-    │   │   ├── eval-unpacker.ts    # Unwrapping eval payloads
-    │   │   └── beautifier.ts       # Code formatting
-    │   ├── 5-extraction/
-    │   │   ├── index.ts            # extract() entry point
-    │   │   ├── ast-extractor.ts    # Base acorn traversal class
-    │   │   ├── endpoint-extractor.ts
-    │   │   ├── secret-extractor.ts # Entropy and heuristic filtering
-    │   │   ├── comment-extractor.ts# True comment extraction
-    │   │   ├── config-extractor.ts
-    │   │   └── entropy.ts          # Shannon entropy scorer
-    │   └── 6-output/
-    │       ├── index.ts            # writeOutputs() — per-host grouping
-    │       └── schema.ts           # Output schema definitions
-    └── types/
-        └── contracts.ts            # Shared TypeScript interfaces
+    │   ├── 1-ingestion/            # Crawl, chunks, Playwright, Wayback
+    │   ├── 2-map-detection/        # Comment, header, path infer
+    │   ├── 3-reconstruction/       # Maps, VLQ, writers
+    │   ├── 4-deobfuscation/        # Static unpack + webcrack
+    │   ├── 5-extraction/           # Endpoints, secrets, comments, configs
+    │   └── 6-output/               # Writers + Zod schemas
+    ├── types/contracts.ts
+    └── tests/security-helpers.test.ts
 ```
 
 ---
 
 ## Tech Stack
 
-| Component | Technology |
-|-----------|-----------|
-| **Runtime** | Node.js / TypeScript |
-| **AST Parsing** | `acorn`, `acorn-walk` |
-| **De-obfuscation Engine** | `webcrack` |
-| **Beautification** | `js-beautify` |
-| **Source Maps** | `source-map` |
-| **Schema Validation** | `zod` |
-| **HTTP Client** | `got` |
-| **Launcher** | Python 3 (optional) |
+| Layer | Choice |
+|-------|--------|
+| Runtime | Node.js / TypeScript |
+| CLI | Commander |
+| HTTP | Native `fetch` (manual redirects) |
+| AST | `acorn` + `acorn-walk` |
+| De-obfuscation | `webcrack` + static unpackers |
+| Beautify | `js-beautify` |
+| Validation | `zod` |
+| Browser (optional) | Playwright |
+| Launcher | Python 3 |
+
+---
+
+## Testing
+
+```bash
+cd blob-unpacker
+npm test          # security helper suite
+npx tsc --noEmit  # typecheck
+```
+
+Coverage includes private-IP detection, path containment, static unpack, first-party host heuristics, and index-map merge.
 
 ---
 
 ## Known Limitations
 
-1. **Headless Browser Overhead** — While the pipeline now supports executing JavaScript via Playwright (`--playwright`), doing so increases memory usage and execution time compared to the static crawler. It is disabled by default for speed.
-
-2. **Secret Detection False Positives** — High-entropy strings (like CSS class hashes or content hashes) may occasionally be flagged as potential secrets, although the strict false-positive heuristics mitigate most of this. The entropy threshold (`--entropy`) can be tuned.
-
-3. **No Authentication** — The crawler does not support authenticated sessions. Pages behind login walls are not crawled.
+1. **Playwright cost** — Optional; higher memory/time. Off by default.
+2. **Secret false positives** — Tunable via `--entropy`; heuristics reduce noise but cannot eliminate it.
+3. **No auth** — Login-walled apps are not crawled unless assets are public.
+4. **webcrack** — Third-party engine; treat hostile samples accordingly.
+5. **Static packer coverage** — Unusual packer shapes may not unwrap; recursion stops without progress.
 
 ---
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Make your changes
-4. Run the pipeline against a test target to verify
-5. Submit a pull request
+1. Fork and branch from `main`
+2. Keep changes scoped; match existing stage boundaries
+3. Run `npm test` and `npx tsc --noEmit`
+4. Open a PR with a short “why” summary
 
 ---
 
 ## License
 
-This project is for educational and authorized security testing purposes only. Always obtain permission before scanning websites you don't own.
+For educational and **authorized** security testing only. Obtain permission before scanning websites you do not own.

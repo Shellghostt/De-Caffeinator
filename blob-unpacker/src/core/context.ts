@@ -34,7 +34,10 @@ export interface PipelineConfig {
   deobfuscation: {
     /** Maximum recursive de-obfuscation passes per asset */
     max_depth: number;
-    /** Enable sandboxed eval for packed loader unwrapping */
+    /**
+     * When true, allow static Dean Edwards packer unpack.
+     * Never executes code in node:vm. When false, skip packer unwrap.
+     */
     eval_sandbox: boolean;
     /** Min array length before attempting string array resolution */
     string_array_threshold: number;
@@ -56,6 +59,8 @@ export interface PipelineConfig {
     /** Delay between requests to the same host (ms) */
     delay_between_ms: number;
     user_agent: string;
+    /** Max response body size in bytes (SSRF/DoS guard) */
+    max_response_bytes: number;
   };
 
   crawl?: {
@@ -123,6 +128,7 @@ export const DEFAULT_CONFIG: PipelineConfig = {
     max_concurrent: 5,
     delay_between_ms: 300,
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    max_response_bytes: 10 * 1024 * 1024,
   },
   crawl: {
     max_depth: 2,
@@ -231,6 +237,7 @@ interface PersistedState {
 export class StateManager {
   private statePath: string;
   private state: PersistedState;
+  private persistChain: Promise<void> = Promise.resolve();
 
   constructor(outputDir: string) {
     this.statePath = path.join(outputDir, ".pipeline-state.json");
@@ -254,7 +261,32 @@ export class StateManager {
   }
 
   private persist(): void {
-    fs.writeFileSync(this.statePath, JSON.stringify(this.state, null, 2));
+    // Atomic write: temp file then rename to avoid corrupt JSON on crash
+    const tmp = this.statePath + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2));
+    try {
+      fs.renameSync(tmp, this.statePath);
+    } catch {
+      // Windows cannot rename over an existing file
+      fs.copyFileSync(tmp, this.statePath);
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /** Serialize state mutations so concurrent processAsset calls cannot clobber updates. */
+  private enqueuePersist(mutate: () => void): void {
+    this.persistChain = this.persistChain
+      .then(() => {
+        mutate();
+        this.persist();
+      })
+      .catch(() => {
+        // Keep chain alive after a failed write
+      });
   }
 
   /** Returns true if this content hash has already been fully processed */
@@ -263,26 +295,33 @@ export class StateManager {
   }
 
   markHashProcessed(hash: string): void {
-    this.state.processed_hashes[hash] = true;
-    this.persist();
+    this.enqueuePersist(() => {
+      this.state.processed_hashes[hash] = true;
+    });
   }
 
   setAssetStatus(url: string, status: AssetProcessingStatus, error?: string): void {
-    const existing = this.state.asset_states[url] || {};
-    this.state.asset_states[url] = {
-      ...existing,
-      url,
-      status,
-      ...(error ? { error } : {}),
-      ...(status === "complete" ? { completed_at: new Date().toISOString() } : {}),
-    };
-    this.persist();
+    this.enqueuePersist(() => {
+      const existing = this.state.asset_states[url] || {};
+      this.state.asset_states[url] = {
+        ...existing,
+        url,
+        status,
+        ...(error ? { error } : {}),
+        ...(status === "complete" ? { completed_at: new Date().toISOString() } : {}),
+      };
+    });
   }
 
-  setAssetReconstructionType(url: string, type: "full" | "partial" | "none"): void {
-    const existing = this.state.asset_states[url] || { url, status: "queued" };
-    this.state.asset_states[url] = { ...existing, reconstruction_type: type };
-    this.persist();
+  setAssetReconstructionType(
+    url: string,
+    type: "full" | "partial" | "none" | "paths_only"
+  ): void {
+    this.enqueuePersist(() => {
+      const existing = this.state.asset_states[url] || { url, status: "queued" };
+      const normalized = type === "paths_only" ? "none" : type;
+      this.state.asset_states[url] = { ...existing, reconstruction_type: normalized };
+    });
   }
 
   getAssetStatus(url: string): AssetState | undefined {
@@ -354,8 +393,13 @@ export class PipelineContext {
   private emitter: EventEmitter;
 
   constructor(userConfig: Partial<PipelineConfig> = {}, emitter?: EventEmitter) {
-    // Deep merge user config over defaults
-    this.config = Object.freeze(deepMerge(DEFAULT_CONFIG, userConfig));
+    // Deep clone defaults then merge so nested objects are not shared
+    const merged = deepMerge(
+      structuredClone(DEFAULT_CONFIG) as PipelineConfig,
+      userConfig
+    );
+    validateConfig(merged);
+    this.config = Object.freeze(merged);
     this.startedAt = new Date().toISOString();
     this.emitter = emitter || new EventEmitter();
 
@@ -434,13 +478,48 @@ function extractTargetHostnameFromConfig(config: PipelineConfig): string {
 
 function deepMerge<T extends object>(base: T, override: Partial<T>): T {
   const result = { ...base };
-  for (const key in override) {
+  for (const key of Object.keys(override) as Array<keyof T>) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      continue;
+    }
     const val = override[key];
     if (val && typeof val === "object" && !Array.isArray(val)) {
-      result[key] = deepMerge(result[key] as object, val as object) as T[typeof key];
+      result[key] = deepMerge(
+        (result[key] ?? {}) as object,
+        val as object
+      ) as T[keyof T];
     } else if (val !== undefined) {
-      result[key] = val as T[typeof key];
+      result[key] = val as T[keyof T];
     }
   }
   return result;
+}
+
+function validateConfig(config: PipelineConfig): void {
+  const clampInt = (n: number, min: number, max: number, fallback: number): number => {
+    if (!Number.isFinite(n) || !Number.isInteger(n)) return fallback;
+    return Math.min(max, Math.max(min, n));
+  };
+
+  config.http.max_concurrent = clampInt(config.http.max_concurrent, 1, 64, 5);
+  config.http.timeout_ms = clampInt(config.http.timeout_ms, 1000, 300_000, 15_000);
+  config.http.delay_between_ms = clampInt(config.http.delay_between_ms, 0, 60_000, 300);
+  if (!Number.isFinite(config.http.max_response_bytes) || config.http.max_response_bytes <= 0) {
+    config.http.max_response_bytes = 10 * 1024 * 1024;
+  }
+  config.http.max_response_bytes = Math.min(
+    config.http.max_response_bytes,
+    100 * 1024 * 1024
+  );
+
+  config.deobfuscation.max_depth = clampInt(config.deobfuscation.max_depth, 1, 20, 5);
+
+  if (config.crawl) {
+    config.crawl.max_depth = clampInt(config.crawl.max_depth, 0, 20, 2);
+    config.crawl.max_pages = clampInt(config.crawl.max_pages, 1, 10_000, 50);
+  }
+
+  if (!Number.isFinite(config.extraction.min_secret_entropy)) {
+    config.extraction.min_secret_entropy = 4.5;
+  }
 }

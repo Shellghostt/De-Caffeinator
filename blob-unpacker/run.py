@@ -105,8 +105,9 @@ def main():
 """)
         sys.exit(0)
 
-    # Build the command
-    cmd = ["npx", "ts-node", "src/index.ts"] + args
+    # Build the command — never use shell=True (Windows cmd injection risk)
+    npx_bin = "npx.cmd" if os.name == "nt" else "npx"
+    cmd = [npx_bin, "ts-node", "src/index.ts"] + args
 
     start_time = datetime.now()
 
@@ -114,7 +115,7 @@ def main():
         result = subprocess.run(
             cmd,
             cwd=script_dir,
-            shell=(os.name == "nt"),
+            shell=False,
         )
 
         duration = datetime.now() - start_time

@@ -1,9 +1,5 @@
 // ============================================================
 // STAGE 6 — DEOBFUSCATED FILE WRITER
-// Writes de-obfuscated JavaScript output to disk.
-// First-party assets → <target>/deobfuscated/
-// Third-party assets → <target>/third-party/<host>/deobfuscated/
-// Webpack-split modules get individual files in a subdirectory.
 // ============================================================
 
 import * as fs from "fs";
@@ -12,6 +8,7 @@ import * as crypto from "crypto";
 import { DeobfuscatedAsset } from "../../types/contracts";
 import { PipelineContext } from "../../core/context";
 import { getAssetDir } from "../../lib/paths";
+import { isPathInside, sanitizeSourcePath } from "../../lib/safe-path";
 
 export function writeDeobfuscatedOutput(
   asset: DeobfuscatedAsset,
@@ -19,29 +16,36 @@ export function writeDeobfuscatedOutput(
 ): void {
   if (!ctx.config.output.write_source_files) return;
 
-  // ── Resolve output dir (first-party vs third-party) ────
   const assetDir = getAssetDir(asset.asset_url, ctx.config.target_urls, ctx.config.output.dir);
   const deobDir = path.join(assetDir, "deobfuscated");
   fs.mkdirSync(deobDir, { recursive: true });
 
-  // ── Also save the raw original JS ──────────────────────
-  // (only if it differs from the deobfuscated version)
   if (asset.original_js && asset.original_js !== asset.readable_js) {
     const rawDir = path.join(assetDir, "raw");
     fs.mkdirSync(rawDir, { recursive: true });
-    const rawPath = path.join(rawDir, `${urlToFilename(asset.asset_url)}.js`);
-    try {
-      fs.writeFileSync(rawPath, asset.original_js, "utf-8");
-    } catch {
-      // Non-critical
+    const rawName = sanitizeSourcePath(urlToFilename(asset.asset_url) + ".js");
+    const rawPath = path.resolve(rawDir, rawName);
+    if (isPathInside(rawDir, rawPath)) {
+      try {
+        fs.writeFileSync(rawPath, asset.original_js, "utf-8");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.logger.warn(`Deob writer: failed to write raw ${rawPath}: ${msg}`, {
+          stage: "stage-6",
+        });
+      }
     }
   }
 
-  // Generate a safe filename from the asset URL
-  const safeName = urlToFilename(asset.asset_url);
+  const safeName = sanitizeSourcePath(urlToFilename(asset.asset_url));
+  const fullPath = path.resolve(deobDir, `${safeName}.js`);
+  if (!isPathInside(deobDir, fullPath)) {
+    ctx.logger.warn(`Deob writer: blocked path outside deobDir for ${asset.asset_url}`, {
+      stage: "stage-6",
+    });
+    return;
+  }
 
-  // Write the full readable JS
-  const fullPath = path.join(deobDir, `${safeName}.js`);
   try {
     fs.writeFileSync(fullPath, asset.readable_js, "utf-8");
   } catch (err) {
@@ -52,39 +56,43 @@ export function writeDeobfuscatedOutput(
     return;
   }
 
-  // If modules were split, write each one individually
   if (asset.modules.length > 0) {
     const moduleDir = path.join(deobDir, safeName);
     fs.mkdirSync(moduleDir, { recursive: true });
 
     for (const mod of asset.modules) {
-      const modName = safeModuleId(mod.id);
-      const modPath = path.join(moduleDir, `${modName}.js`);
+      const modName = sanitizeSourcePath(safeModuleId(mod.id) + ".js");
+      const modPath = path.resolve(moduleDir, modName);
+      if (!isPathInside(moduleDir, modPath)) continue;
       try {
-        // Add a module header comment
-        const header = `// ============================================================\n` +
+        const header =
+          `// ============================================================\n` +
           `// Module: ${mod.id}\n` +
           `// Source: ${asset.asset_url}\n` +
           `// Techniques: ${asset.techniques_applied.join(", ")}\n` +
           `// ============================================================\n\n`;
         fs.writeFileSync(modPath, header + mod.content, "utf-8");
-      } catch {
-        // Skip failed individual module writes
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.logger.warn(`Deob writer: failed module write ${modPath}: ${msg}`, {
+          stage: "stage-6",
+        });
       }
     }
 
-    // Write module index
     const indexContent = asset.modules
       .map((m) => `${safeModuleId(m.id)}.js  ← module "${m.id}"`)
       .join("\n");
     try {
-      fs.writeFileSync(
-        path.join(moduleDir, "_module_index.txt"),
-        indexContent + "\n",
-        "utf-8"
-      );
-    } catch {
-      // Non-critical
+      const indexPath = path.resolve(moduleDir, "_module_index.txt");
+      if (isPathInside(moduleDir, indexPath)) {
+        fs.writeFileSync(indexPath, indexContent + "\n", "utf-8");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.logger.debug(`Deob writer: module index write failed: ${msg}`, {
+        stage: "stage-6",
+      });
     }
   }
 
@@ -95,12 +103,7 @@ export function writeDeobfuscatedOutput(
   );
 }
 
-// ----------------------------------------------------------
-// HELPERS
-// ----------------------------------------------------------
-
 function urlToFilename(url: string): string {
-  // Extract the meaningful part of the URL
   try {
     const parsed = new URL(url);
     let name = parsed.pathname
@@ -109,7 +112,6 @@ function urlToFilename(url: string): string {
       .replace(/\.js$/, "")
       .replace(/[^a-zA-Z0-9._-]/g, "_");
 
-    // Truncate and add a short hash for uniqueness
     if (name.length > 80) {
       const hash = crypto.createHash("md5").update(url).digest("hex").slice(0, 8);
       name = name.slice(0, 72) + "_" + hash;
@@ -117,15 +119,11 @@ function urlToFilename(url: string): string {
 
     return name || "unnamed";
   } catch {
-    // Fallback for non-URL identifiers (e.g., inline scripts)
     const hash = crypto.createHash("md5").update(url).digest("hex").slice(0, 12);
     return `inline_${hash}`;
   }
 }
 
 function safeModuleId(id: string): string {
-  return id
-    .replace(/[^a-zA-Z0-9._-]/g, "_")
-    .replace(/^_+/, "")
-    .slice(0, 60) || "module";
+  return id.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/^_+/, "").slice(0, 60) || "module";
 }

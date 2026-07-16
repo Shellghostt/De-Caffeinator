@@ -43,7 +43,13 @@ import {
   DiscoveredConfig,
   RunReport,
 } from "../../types/contracts";
-import { extractHostname, extractTargetHostname } from "../../lib/paths";
+import { extractHostname, extractTargetHostname, isFirstPartyHost } from "../../lib/paths";
+import {
+  SCHEMA_VERSION,
+  EndpointsContractSchema,
+  ArtifactsContractSchema,
+  parseOrThrow,
+} from "./schema";
 
 // ============================================================
 // PUBLIC API
@@ -76,20 +82,26 @@ export async function writeOutputs(ctx: PipelineContext): Promise<void> {
   // All findings (first-party + third-party) go into one set of files
   // so you don't have to hunt across subdirectories.
   writeDataFile(path.join(targetDir, `endpoints.${format}`), allEndpoints, format);
-  // writeDataFile(path.join(targetDir, `secrets.${format}`),   allSecrets,   format);
+  writeDataFile(path.join(targetDir, `secrets.${format}`),   allSecrets,   format);
   writeDataFile(path.join(targetDir, `comments.${format}`),  allComments,  format);
   writeDataFile(path.join(targetDir, `configs.${format}`),   allConfigs,   format);
 
   // ── Artifact index ───────────────────────────────────────
-  const artifactIndex = buildArtifactIndex(allArtifacts);
+  const artifactIndex = buildArtifactIndex(allArtifacts, targetHost);
   writeJsonFile(path.join(targetDir, "artifact-index.json"), artifactIndex);
 
   // ── Manifests for downstream tools ───────────────────────
   const endpointContract = buildEndpointContract(allEndpoints);
-  writeJsonFile(path.join(targetDir, "manifests", "endpoints-contract.json"), endpointContract);
+  writeJsonFile(
+    path.join(targetDir, "manifests", "endpoints-contract.json"),
+    parseOrThrow(EndpointsContractSchema, endpointContract, "endpoints-contract")
+  );
 
   const artifactContract = buildArtifactContract(allSecrets, allConfigs);
-  writeJsonFile(path.join(targetDir, "manifests", "artifacts-contract.json"), artifactContract);
+  writeJsonFile(
+    path.join(targetDir, "manifests", "artifacts-contract.json"),
+    parseOrThrow(ArtifactsContractSchema, artifactContract, "artifacts-contract")
+  );
 
   // ── Run report ───────────────────────────────────────────
   const totalAssets = ctx.state.getAllAssetStates().length;
@@ -191,13 +203,16 @@ interface ArtifactIndexEntry {
   configs_count: number;
 }
 
-function buildArtifactIndex(allArtifacts: ExtractedArtifacts[]): ArtifactIndexEntry[] {
+function buildArtifactIndex(
+  allArtifacts: ExtractedArtifacts[],
+  targetHost: string
+): ArtifactIndexEntry[] {
   return allArtifacts.map((a) => {
     const host = extractHostname(a.asset_url);
     return {
       asset_url: a.asset_url,
       hostname: host,
-      is_third_party: false, // Will be enriched by caller if needed
+      is_third_party: !isFirstPartyHost(host, targetHost),
       endpoints_count: a.endpoints.length,
       secrets_count: a.secrets.length,
       comments_count: a.comments.length,
@@ -230,8 +245,6 @@ function enrichRunReport(
 // ============================================================
 
 interface EndpointContractEntry {
-  /** Schema version for downstream compatibility */
-  _schema_version: string;
   url: string;
   method: string | null;
   confidence: string;
@@ -246,10 +259,9 @@ function buildEndpointContract(endpoints: DiscoveredEndpoint[]): {
   endpoints: EndpointContractEntry[];
 } {
   return {
-    _schema_version: "1.0.0",
+    _schema_version: SCHEMA_VERSION,
     _generated_at: new Date().toISOString(),
     endpoints: endpoints.map((e) => ({
-      _schema_version: "1.0.0",
       url: e.value,
       method: e.method ?? null,
       confidence: e.confidence,
@@ -299,7 +311,7 @@ function buildArtifactContract(
   }
 
   return {
-    _schema_version: "1.0.0",
+    _schema_version: SCHEMA_VERSION,
     _generated_at: new Date().toISOString(),
     artifacts,
   };
@@ -382,6 +394,7 @@ function generateSummaryReport(
   lines.push(`| Category | Count |`);
   lines.push(`|----------|-------|`);
   lines.push(`| API Endpoints | ${endpoints.length} |`);
+  lines.push(`| Secrets / Tokens | ${secrets.length} |`);
   lines.push(`| Developer Comments | ${comments.length} |`);
   lines.push(`| Configuration Values | ${configs.length} |`);
   lines.push("");
@@ -403,7 +416,21 @@ function generateSummaryReport(
     lines.push("");
   }
 
-  // ── Secrets (Removed by User Request) ───────────────────
+  // ── Secrets (masked values) ─────────────────────────────
+  if (secrets.length > 0) {
+    lines.push("## Potential Secrets");
+    lines.push("");
+    lines.push("| Type | Value (masked) | Entropy | Source |");
+    lines.push("|------|----------------|---------|--------|");
+    for (const s of secrets.slice(0, 50)) {
+      const src = truncate(s.source_file, 40);
+      lines.push(`| ${s.type} | \`${s.value}\` | ${s.entropy} | ${src}:${s.line} |`);
+    }
+    if (secrets.length > 50) {
+      lines.push(`| | ... and ${secrets.length - 50} more | | |`);
+    }
+    lines.push("");
+  }
 
   // ── Security Comments ───────────────────────────────────
   if (comments.length > 0) {

@@ -38,6 +38,20 @@ export function getHostDir(assetUrl: string, baseOutDir: string): string {
 }
 
 /**
+ * True if assetHost is first-party relative to targetHost
+ * (exact match or subdomain of target).
+ */
+export function isFirstPartyHost(assetHost: string, targetHost: string): boolean {
+  const cleanAsset = assetHost.replace(/^www\./, "");
+  const cleanTarget = targetHost.replace(/^www\./, "");
+  if (!cleanAsset || !cleanTarget || cleanAsset === "_unknown") return false;
+  return (
+    cleanAsset === cleanTarget ||
+    cleanAsset.endsWith("." + cleanTarget)
+  );
+}
+
+/**
  * Resolve the output directory for a specific asset, aware of
  * whether it's first-party (same host as target) or third-party.
  *
@@ -59,16 +73,7 @@ export function getAssetDir(
   const assetHost = extractHostname(assetUrl);
   const targetHost = extractTargetHostname(targetUrls);
 
-  const cleanAsset = assetHost.replace(/^www\./, "");
-  const cleanTarget = targetHost.replace(/^www\./, "");
-
-  const isFirstParty = 
-    assetHost === "_unknown" ||
-    cleanAsset === cleanTarget ||
-    cleanAsset.endsWith("." + cleanTarget) ||
-    cleanTarget.endsWith("." + cleanAsset);
-
-  if (isFirstParty) {
+  if (isFirstPartyHost(assetHost, targetHost)) {
     // First-party: write directly under the target folder
     return path.join(baseOutDir, targetHost);
   }

@@ -67,7 +67,12 @@ export async function extract(
   }
 
   // ── PASS 1: Regex-based extraction (broad coverage) ─────
-  const regexEndpoints = units.flatMap((u) => extractEndpoints(u.code, u.sourceFile));
+  const extraEndpointPatterns = ctx.config.extraction.endpoint_patterns;
+  const extraSecretPatterns = ctx.config.extraction.secret_patterns;
+
+  const regexEndpoints = units.flatMap((u) =>
+    extractEndpoints(u.code, u.sourceFile, extraEndpointPatterns)
+  );
   const regexConfigs = units.flatMap((u) => extractConfigs(u.code, u.sourceFile));
 
   // ── PASS 2: AST-based extraction (precision) ───────────
@@ -79,9 +84,9 @@ export async function extract(
       const astResult = extractViaAst(unit.code, unit.sourceFile);
       astEndpoints.push(...astResult.endpoints);
       astConfigs.push(...astResult.configs);
-    } catch {
-      // AST parsing failed for this unit — regex results still available
-      ctx.logger.debug(`Stage 5: AST extraction failed for ${unit.sourceFile}`, {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.logger.warn(`Stage 5: AST extraction failed for ${unit.sourceFile}: ${msg}`, {
         stage: "stage-5",
         asset_url: assetUrl,
       });
@@ -95,7 +100,9 @@ export async function extract(
   );
 
   const secrets = deduplicateBy(
-    units.flatMap((u) => extractSecrets(u.code, u.sourceFile, minEntropy)),
+    units.flatMap((u) =>
+      extractSecrets(u.code, u.sourceFile, minEntropy, extraSecretPatterns)
+    ),
     (s) => s.value
   );
 

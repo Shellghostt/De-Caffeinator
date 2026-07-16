@@ -11,6 +11,7 @@
 // ============================================================
 
 import { DiscoveredEndpoint, ConfidenceLevel } from "../../types/contracts";
+import { buildLineStarts, lineNumberAt } from "../../lib/line-index";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS";
 type EndpointClass = "public" | "internal" | "hidden";
@@ -39,8 +40,7 @@ const HIGH_CONF_PATTERNS: RegExp[] = [
   /(?:\.get|\.post|\.put|\.delete|\.patch)\s*\(\s*["'`](\/api\/[^"'`\s]+)["'`]/g,
   /(?:\.get|\.post|\.put|\.delete|\.patch)\s*\(\s*["'`](\/v\d+\/[^"'`\s]+)["'`]/g,
 
-  // XMLHttpRequest open()
-  /\.open\s*\(\s*["'`](GET|POST|PUT|DELETE|PATCH)["'`]\s*,\s*["'`]([^"'`\s]+)["'`]/gi,
+  // NOTE: XMLHttpRequest .open() is handled separately (method in group 1, URL in group 2)
 
   // url/baseURL/endpoint assignments
   /(?:url|baseURL|baseUrl|endpoint|apiUrl|apiEndpoint)\s*[:=]\s*["'`]((?:https?:\/\/|\/)[^"'`\s]{2,})["'`]/gi,
@@ -102,11 +102,13 @@ const INTERNAL_KEYWORDS = /(?:internal|admin|debug|staging|test|private|hidden|b
 
 export function extractEndpoints(
   code: string,
-  sourceFile: string
+  sourceFile: string,
+  extraPatterns: string[] = []
 ): DiscoveredEndpoint[] {
   const seen = new Set<string>();
   const results: RawEndpoint[] = [];
   const lines = code.split("\n");
+  const lineStarts = buildLineStarts(code);
 
   const addResult = (value: string, confidence: ConfidenceLevel, matchIndex: number, contextOverride?: string) => {
     if (!value || NOISE_RE.test(value) || NOISE_PATHS.has(value)) return;
@@ -114,7 +116,7 @@ export function extractEndpoints(
     if (seen.has(value)) return;
     seen.add(value);
 
-    const line = getLineNumber(code, matchIndex);
+    const line = lineNumberAt(lineStarts, matchIndex);
     const context_snippet = contextOverride ?? getContext(lines, line);
     const method = extractMethod(context_snippet);
     const classification = classifyEndpoint(value, context_snippet);
@@ -127,6 +129,20 @@ export function extractEndpoints(
   runPatterns(code, MED_CONF_PATTERNS, "medium", addResult);
   runPatterns(code, LOW_CONF_PATTERNS, "low", addResult);
   runPatterns(code, ROUTE_PATTERNS, "medium", addResult);
+
+  // Custom operator patterns from config
+  for (const raw of extraPatterns) {
+    try {
+      const re = new RegExp(raw, "g");
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(code)) !== null) {
+        addResult(m[1] ?? m[0], "medium", m.index);
+      }
+    } catch {
+      // invalid user regex — skip
+    }
+  }
 
   // ── Template literals ───────────────────────────────────────
   TEMPLATE_PATH_RE.lastIndex = 0;
@@ -143,7 +159,7 @@ export function extractEndpoints(
     const url = match[2];
     if (!seen.has(url) && !NOISE_RE.test(url)) {
       seen.add(url);
-      const line = getLineNumber(code, match.index);
+      const line = lineNumberAt(lineStarts, match.index);
       const context_snippet = getContext(lines, line);
       const classification = classifyEndpoint(url, context_snippet);
       results.push({ value: url, method, confidence: "high", line, context_snippet, classification });
@@ -157,6 +173,7 @@ export function extractEndpoints(
     source_file: sourceFile,
     line: r.line,
     context_snippet: r.context_snippet,
+    classification: r.classification,
   }));
 }
 
@@ -199,10 +216,6 @@ function extractMethod(snippet: string): HttpMethod | undefined {
   const upper = m[1].toUpperCase();
   const valid: HttpMethod[] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
   return valid.includes(upper as HttpMethod) ? (upper as HttpMethod) : undefined;
-}
-
-function getLineNumber(code: string, index: number): number {
-  return code.slice(0, index).split("\n").length;
 }
 
 function getContext(lines: string[], lineNum: number): string {

@@ -216,12 +216,16 @@ function comparePriority(a: QueueItem, b: QueueItem): number {
 export function normalizeUrl(raw: string): string {
   try {
     const u = new URL(raw);
-    // Remove fragment
     u.hash = "";
-    // Lowercase scheme + host
-    return u.href.toLowerCase().replace(/\/$/, "");
+    // Lowercase scheme + host only; preserve path/query casing
+    u.protocol = u.protocol.toLowerCase();
+    u.hostname = u.hostname.toLowerCase();
+    let href = u.href;
+    if (href.endsWith("/") && u.pathname !== "/") {
+      href = href.slice(0, -1);
+    }
+    return href;
   } catch {
-    // Not a full URL — return as-is (handles relative paths passed in)
-    return raw.replace(/#.*$/, "").toLowerCase().replace(/\/$/, "");
+    return raw.replace(/#.*$/, "").replace(/\/$/, "");
   }
 }

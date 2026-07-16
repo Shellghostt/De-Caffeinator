@@ -167,18 +167,23 @@ export async function inferMapPath(
           continue;
         }
 
-        // Validate body looks like a source map (Hellhound-Spider validation)
+        // Validate body is parseable source-map JSON
         const body = getRes.body.trimStart();
-        if (
-          !body.startsWith("<") &&          // not HTML
-          body.includes('"sources":') &&    // has sources array
-          body.includes('"mappings":')       // has VLQ mappings
-        ) {
-          ctx.logger.info(
-            `Path inferrer (GET fallback): found map at ${candidate}`,
-            { stage: "stage-2", asset_url: assetUrl }
-          );
-          return { found: true, url: candidate };
+        if (body.startsWith("<")) continue;
+        try {
+          const parsed = JSON.parse(body) as Record<string, unknown>;
+          if (
+            (Array.isArray(parsed.sources) || typeof parsed.mappings === "string") &&
+            (parsed.version === 3 || Array.isArray(parsed.sections))
+          ) {
+            ctx.logger.info(
+              `Path inferrer (GET fallback): found map at ${candidate}`,
+              { stage: "stage-2", asset_url: assetUrl }
+            );
+            return { found: true, url: candidate };
+          }
+        } catch {
+          // not JSON
         }
       }
     } catch {

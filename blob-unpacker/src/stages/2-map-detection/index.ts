@@ -54,12 +54,20 @@ export async function detectMap(
           asset_url: asset.url,
         });
         const mapContent = await fetchMapContent(result.url, ctx, asset.url);
-        return {
-          ...asset,
-          map_url: result.url,
-          map_source: "comment",
-          ...(mapContent ? { map_content: mapContent } : {}),
-        };
+        if (!mapContent) {
+          ctx.logger.warn(`Stage 2: map URL found but content unavailable — treating as no map`, {
+            stage: "stage-2",
+            asset_url: asset.url,
+          });
+          // Fall through to next strategy / no-map
+        } else {
+          return {
+            ...asset,
+            map_url: result.url,
+            map_source: "comment",
+            map_content: mapContent,
+          };
+        }
       }
     }
   }
@@ -73,12 +81,19 @@ export async function detectMap(
         asset_url: asset.url,
       });
       const mapContent = await fetchMapContent(result.url, ctx, asset.url);
-      return {
-        ...asset,
-        map_url: result.url,
-        map_source: "header",
-        ...(mapContent ? { map_content: mapContent } : {}),
-      };
+      if (!mapContent) {
+        ctx.logger.warn(`Stage 2: header map URL found but content unavailable`, {
+          stage: "stage-2",
+          asset_url: asset.url,
+        });
+      } else {
+        return {
+          ...asset,
+          map_url: result.url,
+          map_source: "header",
+          map_content: mapContent,
+        };
+      }
     }
   }
 
@@ -86,12 +101,19 @@ export async function detectMap(
   const inferResult = await inferMapPath(asset.url, ctx);
   if (inferResult.found && inferResult.url) {
     const mapContent = await fetchMapContent(inferResult.url, ctx, asset.url);
-    return {
-      ...asset,
-      map_url: inferResult.url,
-      map_source: "inferred",
-      ...(mapContent ? { map_content: mapContent } : {}),
-    };
+    if (!mapContent) {
+      ctx.logger.warn(`Stage 2: inferred map URL found but content unavailable`, {
+        stage: "stage-2",
+        asset_url: asset.url,
+      });
+    } else {
+      return {
+        ...asset,
+        map_url: inferResult.url,
+        map_source: "inferred",
+        map_content: mapContent,
+      };
+    }
   }
 
   // ── No map found ─────────────────────────────────────────
@@ -99,7 +121,7 @@ export async function detectMap(
     stage: "stage-2",
     asset_url: asset.url,
   });
-  return { ...asset, map_url: null, map_source: null };
+  return { ...asset, map_url: null, map_source: undefined };
 }
 
 // ----------------------------------------------------------

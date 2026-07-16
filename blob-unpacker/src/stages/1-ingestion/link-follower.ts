@@ -7,7 +7,8 @@
 // ============================================================
 
 import { PipelineContext } from "../../core/context";
-import { fetchUrl } from "../../lib/http";
+import { fetchUrl, sameOrigin } from "../../lib/http";
+import { decodeHtmlEntities } from "../../lib/html-entities";
 
 // Matches <a href="..."> links
 const ANCHOR_HREF_RE = /<a[^>]+href=["']([^"'#]+)["']/gi;
@@ -52,12 +53,7 @@ function pagePriority(url: string): number {
  * which auto-decodes entities.
  */
 function unescapeHtml(s: string): string {
-  return s
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#039;/gi, "'");
+  return decodeHtmlEntities(s);
 }
 
 export interface FollowedPage {
@@ -127,6 +123,13 @@ export async function followLinks(
       ctx.logger.debug(`Link follower (Sitemap): fetching ${sUrl}`, { stage: "stage-1" });
       const res = await fetchUrl(sUrl, ctx);
       if (res.status < 200 || res.status >= 300) continue;
+      if (!sameOrigin(origin, res.url)) {
+        ctx.logger.debug(
+          `Link follower (Sitemap): skipped off-origin redirect ${sUrl} → ${res.url}`,
+          { stage: "stage-1" }
+        );
+        continue;
+      }
       const ct = res.headers["content-type"] ?? "";
       if (!ct.includes("text/html")) continue;
 
@@ -170,6 +173,15 @@ export async function followLinks(
           const res = await fetchUrl(link, ctx);
 
           if (res.status < 200 || res.status >= 300) continue;
+
+          // Re-validate origin after redirects — prevent crawl escape via 30x
+          if (!sameOrigin(origin, res.url)) {
+            ctx.logger.debug(
+              `Link follower: skipped off-origin redirect ${link} → ${res.url}`,
+              { stage: "stage-1" }
+            );
+            continue;
+          }
 
           // Only follow HTML pages
           const ct = res.headers["content-type"] ?? "";

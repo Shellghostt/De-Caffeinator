@@ -53,17 +53,14 @@ export function classifyAsset(url: string, isInline = false): AssetType {
  * Rejects HTML error pages and redirects served as 200.
  */
 export function isJavaScript(body: string, contentType?: string): boolean {
-  // Trust content-type if present
-  if (contentType) {
-    if (contentType.includes("javascript")) return true;
-    if (contentType.includes("text/html")) return false;
-  }
-
-  // Fallback: sniff first non-whitespace characters
   const trimmed = body.trimStart();
-  if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html")) return false;
 
-  // Must contain at least some JS-like tokens
+  // Always sniff — Content-Type is a hint, not authority (servers often lie)
+  if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html") || trimmed.startsWith("<HTML")) {
+    return false;
+  }
+  if (contentType?.includes("text/html")) return false;
+
   const jsSignals = [
     /\bfunction\b/,
     /\bvar\b|\blet\b|\bconst\b/,
@@ -72,5 +69,12 @@ export function isJavaScript(body: string, contentType?: string): boolean {
     /\bmodule\b/,
     /=>/,
   ];
-  return jsSignals.some((p) => p.test(trimmed.slice(0, 2000)));
+  const looksLikeJs = jsSignals.some((p) => p.test(trimmed.slice(0, 2000)));
+
+  if (contentType?.includes("javascript") || contentType?.includes("ecmascript")) {
+    // CT claims JS — still require at least one signal or non-empty non-HTML body
+    return looksLikeJs || (trimmed.length > 0 && !trimmed.startsWith("<"));
+  }
+
+  return looksLikeJs;
 }

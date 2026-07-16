@@ -41,8 +41,11 @@ export async function deobfuscate(
   const modules: WebpackModule[] = [];
 
   // ── Step 1: Eval/packer unwrapping (must be first) ───────
-  // webcrack can't handle outer eval wrappers, so we pre-process
-  const evalResult = evalUnpack(code);
+  // Static unwrap only — never executes untrusted code in node:vm.
+  // When eval_sandbox is false, Dean Edwards packer unpack is skipped.
+  const evalResult = evalUnpack(code, {
+    evalSandbox: ctx.config.deobfuscation.eval_sandbox,
+  });
   if (evalResult.unpacked) {
     code = evalResult.code;
     techniques.push("eval_unpack");

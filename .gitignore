@@ -1,10 +1,55 @@
+# Dependencies
 node_modules/
-output/
+
+# Build / compile output
 dist/
 build/
+*.tsbuildinfo
+
+# Scan results (may contain secrets)
+output/
+results/
+**/pipeline.log.jsonl
+**/.pipeline-state.json
+**/.pipeline-state.json.tmp
+
+# Environment / secrets
 .env
 .env.*
+!.env.example
+
+# Logs
 *.log
-.DS_Store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Binaries / packaging
 *.exe
 blobunpacker.pdf
+
+# Python launcher
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Playwright (optional browser crawl)
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

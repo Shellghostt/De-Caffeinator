@@ -7,8 +7,8 @@
 // that appear under different path aliases.
 // ============================================================
 
-import * as path from "path";
 import { ReconstructedFile } from "../../types/contracts";
+import { sanitizeSourcePath } from "../../lib/safe-path";
 import { ParsedSourceMap } from "./map-parser";
 
 export function fullReconstruct(map: ParsedSourceMap): ReconstructedFile[] {
@@ -27,7 +27,7 @@ export function fullReconstruct(map: ParsedSourceMap): ReconstructedFile[] {
     // Skip empty content (sometimes sourcesContent has empty strings)
     if (content.trim().length === 0) continue;
 
-    const sanitized = sanitizePath(sourcePath);
+    const sanitized = sanitizeSourcePath(sourcePath);
 
     // Deduplicate: same content under different path aliases
     if (seenPaths.has(sanitized)) continue;
@@ -46,22 +46,6 @@ export function fullReconstruct(map: ParsedSourceMap): ReconstructedFile[] {
   }
 
   return files;
-}
-
-function sanitizePath(p: string): string {
-  // Prevent path traversal — strip leading slashes and ..
-  let normalized = path.normalize(p);
-
-  // Remove leading ../ sequences
-  normalized = normalized.replace(/^(\.\.[/\\])+/, "");
-
-  // Remove leading / or \ 
-  normalized = normalized.replace(/^[/\\]+/, "");
-
-  // Remove Windows drive letters (C:\...)
-  normalized = normalized.replace(/^[a-zA-Z]:[/\\]/, "");
-
-  return normalized;
 }
 
 /**

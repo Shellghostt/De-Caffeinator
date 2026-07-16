@@ -27,8 +27,8 @@ const ENV_ACCESS_PATTERNS: RegExp[] = [
   /(?:window|globalThis|self)\.__(\w+)__\s*[:=]\s*["'`]([^"'`\n]{2,200})["'`]/g,
 ];
 
-// ── PATTERN 2: Config object blocks ──────────────────────────
-const CONFIG_BLOCK_RE = /(?:config|CONFIG|Config|settings|SETTINGS|env|ENV|options|OPTIONS)\s*[:=]\s*\{([^}]{10,2000})\}/g;
+// ── PATTERN 2: Config object blocks (opening brace only — depth-matched below)
+const CONFIG_BLOCK_START_RE = /(?:config|CONFIG|Config|settings|SETTINGS|env|ENV|options|OPTIONS)\s*[:=]\s*\{/g;
 
 // ── PATTERN 3: Feature flags ─────────────────────────────────
 const FEATURE_FLAG_RE = /["'`]?(\w+(?:Feature|Flag|Enabled|Disabled|Toggle|Experiment))\s*["'`]?\s*:\s*(true|false)/gi;
@@ -38,16 +38,19 @@ const SERVICE_CONFIG_PATTERNS: Array<{
   service: string;
   re: RegExp;
   keys: string[];
+  balanced?: boolean;
 }> = [
   {
     service: "Firebase",
-    re: /(?:firebase(?:Config)?|firebaseApp)\s*[:=]\s*\{([^}]{20,1000})\}/gi,
+    re: /(?:firebase(?:Config)?|firebaseApp)\s*[:=]\s*\{/gi,
     keys: ["apiKey", "authDomain", "projectId", "storageBucket", "messagingSenderId", "appId", "measurementId"],
+    balanced: true,
   },
   {
     service: "Sentry",
-    re: /Sentry\.init\s*\(\s*\{([^}]{10,500})\}/gi,
+    re: /Sentry\.init\s*\(\s*\{/gi,
     keys: ["dsn", "environment", "release", "tracesSampleRate"],
+    balanced: true,
   },
   {
     service: "Stripe",
@@ -56,8 +59,9 @@ const SERVICE_CONFIG_PATTERNS: Array<{
   },
   {
     service: "Auth0",
-    re: /(?:auth0|Auth0)\s*[:=]\s*\{([^}]{10,500})\}/gi,
+    re: /(?:auth0|Auth0)\s*[:=]\s*\{/gi,
     keys: ["domain", "clientId", "audience", "redirectUri"],
+    balanced: true,
   },
   {
     service: "Algolia",
@@ -76,8 +80,9 @@ const SERVICE_CONFIG_PATTERNS: Array<{
   },
   {
     service: "AWS/Amplify",
-    re: /(?:Amplify|aws[_-]?config)\s*[:=]\s*\{([^}]{20,1000})\}/gi,
+    re: /(?:Amplify|aws[_-]?config)\s*[:=]\s*\{/gi,
     keys: ["region", "userPoolId", "userPoolWebClientId", "identityPoolId"],
+    balanced: true,
   },
 ];
 
@@ -120,23 +125,22 @@ export function extractConfigs(
     add(match[1], match[2], line);
   }
 
-  // ── Phase 3: Config block extraction ────────────────────────
-  CONFIG_BLOCK_RE.lastIndex = 0;
-  while ((match = CONFIG_BLOCK_RE.exec(code)) !== null) {
-    const block = match[1];
+  // ── Phase 3: Config block extraction (brace-balanced) ───────
+  CONFIG_BLOCK_START_RE.lastIndex = 0;
+  while ((match = CONFIG_BLOCK_START_RE.exec(code)) !== null) {
+    const openIdx = match.index + match[0].length - 1;
+    const block = extractBalancedObject(code, openIdx);
+    if (!block || block.length < 10) continue;
     const blockLine = getLineNumber(code, match.index);
 
-    // Extract string key-value pairs
     PAIR_RE.lastIndex = 0;
     let pairMatch: RegExpExecArray | null;
     while ((pairMatch = PAIR_RE.exec(block)) !== null) {
       add(pairMatch[1], pairMatch[2], blockLine);
     }
 
-    // Extract boolean/numeric config values
     BOOL_PAIR_RE.lastIndex = 0;
     while ((pairMatch = BOOL_PAIR_RE.exec(block)) !== null) {
-      // Only capture if key looks config-like
       const key = pairMatch[1];
       if (/(?:debug|enable|disable|mode|flag|feature|show|hide|allow|verbose|log)/i.test(key)) {
         add(key, pairMatch[2], blockLine);
@@ -150,15 +154,27 @@ export function extractConfigs(
     while ((match = service.re.exec(code)) !== null) {
       const blockLine = getLineNumber(code, match.index);
 
+      if (service.balanced) {
+        const openIdx = match.index + match[0].length - 1;
+        const block = extractBalancedObject(code, openIdx);
+        if (!block) continue;
+        PAIR_RE.lastIndex = 0;
+        let pairMatch: RegExpExecArray | null;
+        while ((pairMatch = PAIR_RE.exec(block)) !== null) {
+          if (service.keys.includes(pairMatch[1]) || service.keys.length === 0) {
+            add(`${service.service}.${pairMatch[1]}`, pairMatch[2], blockLine);
+          }
+        }
+        continue;
+      }
+
       if (match.length >= 3 && service.keys.length >= 2) {
-        // Direct arg patterns (e.g., algoliasearch(appId, apiKey))
         for (let i = 0; i < Math.min(match.length - 1, service.keys.length); i++) {
           if (match[i + 1]) {
             add(`${service.service}.${service.keys[i]}`, match[i + 1], blockLine);
           }
         }
       } else if (match[1]) {
-        // Block patterns — parse key-value pairs inside
         if (match[1].includes(":")) {
           PAIR_RE.lastIndex = 0;
           let pairMatch: RegExpExecArray | null;
@@ -168,7 +184,6 @@ export function extractConfigs(
             }
           }
         } else {
-          // Single value capture (e.g., Stripe publishable key)
           add(`${service.service}.${service.keys[0]}`, match[1], blockLine);
         }
       }
@@ -192,4 +207,40 @@ export function extractConfigs(
 
 function getLineNumber(code: string, index: number): number {
   return code.slice(0, index).split("\n").length;
+}
+
+/** Extract object literal body starting at `{` index (inclusive of braces removed). */
+function extractBalancedObject(code: string, openBraceIndex: number): string | null {
+  if (code[openBraceIndex] !== "{") return null;
+  let depth = 0;
+  let inStr: string | null = null;
+  let escaped = false;
+
+  for (let i = openBraceIndex; i < code.length && i < openBraceIndex + 8000; i++) {
+    const ch = code[i];
+    if (inStr) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === inStr) inStr = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      inStr = ch;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        return code.slice(openBraceIndex + 1, i);
+      }
+    }
+  }
+  return null;
 }

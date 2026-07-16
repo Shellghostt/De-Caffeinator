@@ -11,6 +11,7 @@
 // ============================================================
 
 import { ReconstructedFile } from "../../types/contracts";
+import { sanitizeSourcePath } from "../../lib/safe-path";
 import { ParsedSourceMap } from "./map-parser";
 import { recoverNames } from "./name-recovery";
 import { decodeMappings, groupBySource } from "./vlq-decoder";
@@ -35,10 +36,11 @@ export function partialReconstruct(
   // ── Phase 1: Recover files that have sourcesContent ──────
   if (map.sourcesContent) {
     for (let i = 0; i < map.sources.length; i++) {
-      const filePath = map.sources[i];
+      const rawPath = map.sources[i];
       const content = map.sourcesContent[i];
 
-      if (!filePath) continue;
+      if (!rawPath) continue;
+      const filePath = sanitizeSourcePath(rawPath);
       knownPaths.push(filePath);
 
       if (typeof content === "string" && content.length > 0) {
@@ -51,8 +53,9 @@ export function partialReconstruct(
     // Only paths — no content at all
     for (const p of map.sources) {
       if (p) {
-        knownPaths.push(p);
-        unrecoverablePaths.push(p);
+        const filePath = sanitizeSourcePath(p);
+        knownPaths.push(filePath);
+        unrecoverablePaths.push(filePath);
       }
     }
   }
@@ -116,7 +119,10 @@ function extractFragmentsViaMappings(
   const results: ReconstructedFile[] = [];
 
   for (const targetPath of targetPaths) {
-    const sourceIdx = map.sources.indexOf(targetPath);
+    // map.sources may still be raw; match via sanitized form
+    const sourceIdx = map.sources.findIndex(
+      (s) => s != null && sanitizeSourcePath(s) === targetPath
+    );
     if (sourceIdx < 0) continue;
 
     const sourceSegments = bySource.get(sourceIdx);

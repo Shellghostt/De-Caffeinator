@@ -83,6 +83,37 @@ function printBanner(): void {
   `);
 }
 
+function parsePositiveInt(raw: string, fallback: number, min = 1, max = 1_000_000): number {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function parseNonNegInt(raw: string, fallback: number, max = 1_000_000): number {
+  return parsePositiveInt(raw, fallback, 0, max);
+}
+
+function parsePositiveFloat(raw: string, fallback: number, min = 0, max = 8): number {
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function normalizeTargetUrl(raw: string): string {
+  const trimmed = raw.trim();
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    throw new Error(`Invalid target URL: ${raw}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Only http/https URLs are supported (got ${parsed.protocol})`);
+  }
+  return parsed.href;
+}
+
 // ----------------------------------------------------------
 // CLI DEFINITION (Commander)
 // ----------------------------------------------------------
@@ -134,16 +165,17 @@ program
 
   // ── Action ──────────────────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  .action(async (url: string, opts: Record<string, any>) => {
+  .action(async (rawUrl: string, opts: Record<string, any>) => {
     printBanner();
 
-    // Normalize URL
-    if (!url.startsWith("http")) {
-      const isLocal =
-        url.startsWith("localhost") ||
-        url.startsWith("127.0.0.1") ||
-        url.startsWith("[::1]");
-      url = (isLocal ? "http://" : "https://") + url;
+    let url: string;
+    try {
+      url = normalizeTargetUrl(rawUrl);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`\n\x1b[91m\x1b[1m❌ ${msg}\x1b[0m\n`);
+      process.exit(1);
+      return;
     }
 
     // ── Apply preset profiles ─────────────────────────────
@@ -185,38 +217,39 @@ program
         format: (opts.format === "jsonl" ? "jsonl" : "json") as "json" | "jsonl",
       },
       http: {
-        timeout_ms: parseInt(opts.timeout, 10),
-        max_concurrent: parseInt(opts.concurrency, 10),
-        delay_between_ms: parseInt(opts.delay, 10),
+        timeout_ms: parsePositiveInt(opts.timeout, 15000, 1000, 300000),
+        max_concurrent: parsePositiveInt(opts.concurrency, 5, 1, 64),
+        delay_between_ms: parseNonNegInt(opts.delay, 300, 60000),
         user_agent: opts.userAgent,
+        max_response_bytes: 10 * 1024 * 1024,
       },
       crawl: {
-        max_depth: parseInt(opts.depth, 10),
-        max_pages: parseInt(opts.pages, 10),
+        max_depth: parseNonNegInt(opts.depth, 2, 20),
+        max_pages: parsePositiveInt(opts.pages, 50, 1, 10000),
         discover_chunks: opts.chunks !== false,
       },
       playwright: {
         enabled: Boolean(opts.playwright),
         browser: (opts.pwBrowser ?? "chromium") as "chromium" | "firefox" | "webkit",
-        timeout_ms: parseInt(opts.pwTimeout ?? "30000", 10),
+        timeout_ms: parsePositiveInt(opts.pwTimeout ?? "30000", 30000, 1000, 300000),
         wait_until: "networkidle",
         headless: !opts.pwVisible,
-        max_pages: parseInt(opts.pwPages ?? "20", 10),
+        max_pages: parsePositiveInt(opts.pwPages ?? "20", 20, 1, 500),
       },
       wayback: {
         enabled: Boolean(opts.wayback),
-        max_results: parseInt(opts.wbResults ?? "200", 10),
-        max_age_days: parseInt(opts.wbMaxAge ?? "0", 10),
+        max_results: parsePositiveInt(opts.wbResults ?? "200", 200, 1, 5000),
+        max_age_days: parseNonNegInt(opts.wbMaxAge ?? "0", 0, 36500),
       },
       deobfuscation: {
-        max_depth: parseInt(opts.deobfDepth, 10),
-        eval_sandbox: true,
+        max_depth: parsePositiveInt(opts.deobfDepth, 5, 1, 20),
+        eval_sandbox: opts.evalSandbox !== false,
         string_array_threshold: 10,
       },
       extraction: {
         endpoint_patterns: [],
         secret_patterns: [],
-        min_secret_entropy: parseFloat(opts.entropy),
+        min_secret_entropy: parsePositiveFloat(opts.entropy, 4.5, 0, 8),
       },
     };
 
@@ -265,21 +298,16 @@ async function runInteractiveMode() {
     output: process.stdout
   });
 
-  let url = await rl.question("Enter the Target URL (e.g., https://example.com): ");
-  if (!url || url.trim() === "") {
-    console.log("❌ URL is required.");
+  let url: string;
+  try {
+    url = normalizeTargetUrl(await rl.question("Enter the Target URL (e.g., https://example.com): "));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`❌ ${msg}`);
     await rl.question("\nPress Enter to exit...");
     rl.close();
     process.exit(1);
-  }
-
-  // Normalize URL
-  if (!url.startsWith("http")) {
-    const isLocal =
-      url.startsWith("localhost") ||
-      url.startsWith("127.0.0.1") ||
-      url.startsWith("[::1]");
-    url = (isLocal ? "http://" : "https://") + url;
+    return;
   }
 
   let outDir = await rl.question("Enter Output Directory (default: ./output): ");
@@ -298,14 +326,15 @@ async function runInteractiveMode() {
       format: "json",
     },
     http: {
-      timeout_ms: 20000,
+      timeout_ms: 15000,
       max_concurrent: 5,
       delay_between_ms: 300,
       user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      max_response_bytes: 10 * 1024 * 1024,
     },
     crawl: {
-      max_depth: 3,
-      max_pages: 100,
+      max_depth: 2,
+      max_pages: 50,
       discover_chunks: true,
     },
     deobfuscation: {
@@ -316,7 +345,7 @@ async function runInteractiveMode() {
     extraction: {
       endpoint_patterns: [],
       secret_patterns: [],
-      min_secret_entropy: 4.0,
+      min_secret_entropy: 4.5,
     },
   };
 
@@ -330,6 +359,9 @@ async function runInteractiveMode() {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`\n\x1b[91m\x1b[1m❌ Pipeline failed after ${elapsed}s: ${msg}\x1b[0m\n`);
+    await rl.question("\nPress Enter to exit...");
+    rl.close();
+    process.exit(1);
   }
 
   await rl.question("\nPress Enter to exit...");

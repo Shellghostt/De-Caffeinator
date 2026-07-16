@@ -15,7 +15,7 @@ const BEAUTIFY_OPTIONS = {
   keep_array_indentation: false,
   break_chained_methods: false,
   space_before_conditional: true,
-  unescape_strings: true,
+  unescape_strings: false,
   jslint_happy: false,
   end_with_newline: true,
   wrap_line_length: 0,
